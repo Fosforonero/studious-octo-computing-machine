@@ -47,6 +47,7 @@ class OpenRouterProvider implements AiProvider {
         model: options.model ?? process.env.OPENROUTER_EXPERT_MODEL ?? "openai/gpt-5.4-mini",
         messages: [{ role: "system", content: system }, { role: "user", content }],
         response_format: { type: "json_object" },
+        max_tokens: 4000,
         ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
       }),
     });

@@ -5,6 +5,11 @@ import type { ExtractedPage } from "@/lib/audit/types";
 export interface BrowserScanResult { page: ExtractedPage; desktopScreenshot: Buffer; mobileScreenshot: Buffer; }
 
 async function secureContext(context: BrowserContext) {
+  // tsx/esbuild always compiles this project with keepNames enabled, which wraps named
+  // functions declared inside page.evaluate() callbacks in a __name(fn, "name") helper call.
+  // That helper only exists in the Node module scope, not in the page's isolated browser
+  // realm, so evaluate() throws "__name is not defined" unless we shim it here first.
+  await context.addInitScript(() => { (window as unknown as { __name?: (fn: unknown, name?: string) => unknown }).__name ??= (fn: unknown) => fn; });
   await context.route("**/*", async (route) => {
     const requestUrl = route.request().url();
     if (!requestUrl.startsWith("http:" ) && !requestUrl.startsWith("https:")) return route.continue();
@@ -98,7 +103,7 @@ async function addAnnotations(page: Page, ctas: ExtractedPage["ctas"]) {
 
 export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult> {
   const url = await assertSafeUrl(inputUrl);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage"] });
   try {
     const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, userAgent: "LensiqBot/0.1 (+https://lensiq.site/bot)" });
     await secureContext(desktop);

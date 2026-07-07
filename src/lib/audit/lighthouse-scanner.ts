@@ -13,7 +13,7 @@ export async function runLighthouse(inputUrl: string): Promise<AuditMetrics> {
   const pinnedAddress = await resolveSafeHostAddress(new URL(url).hostname);
   const chrome = await chromeLauncher.launch({
     chromePath: chromium.executablePath(),
-    chromeFlags: ["--headless", "--no-sandbox", "--disable-gpu", `--host-resolver-rules=MAP ${new URL(url).hostname} ${pinnedAddress}`],
+    chromeFlags: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", `--host-resolver-rules=MAP ${new URL(url).hostname} ${pinnedAddress}`],
   });
   try {
     const result = await lighthouse(url, { port: chrome.port, output: "json", logLevel: "error", onlyCategories: ["performance", "accessibility", "seo", "best-practices"] });
