@@ -25,6 +25,7 @@
     "playwright": "^1.54.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
+    "stripe": "^22.3.0",
     "tailwind-merge": "^3.3.0",
     "zod": "^4.0.5"
   },

@@ -2,7 +2,23 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import { assertSafeUrl } from "@/lib/security/url";
 import type { ExtractedPage } from "@/lib/audit/types";
 
-export interface BrowserScanResult { page: ExtractedPage; desktopScreenshot: Buffer; mobileScreenshot: Buffer; }
+export interface BrowserScanResult { page: ExtractedPage; desktopScreenshot: Buffer; mobileScreenshot: Buffer; ctaScreenshots: { index: number; buffer: Buffer }[]; }
+
+const COOKIE_CONSENT_PATTERNS = [/accept all/i, /accept cookies/i, /^accept$/i, /i accept/i, /^agree$/i, /i agree/i, /got it/i, /allow all/i, /accetta tutto/i, /^accetta$/i, /acconsento/i, /consenti tutto/i, /ho capito/i];
+
+async function dismissCookieBanner(page: Page): Promise<boolean> {
+  for (const pattern of COOKIE_CONSENT_PATTERNS) {
+    const button = page.getByRole("button", { name: pattern }).first();
+    try {
+      if (await button.isVisible({ timeout: 400 })) {
+        await button.click({ timeout: 1500 });
+        await page.waitForTimeout(400);
+        return true;
+      }
+    } catch { /* pattern not present, try the next one */ }
+  }
+  return false;
+}
 
 async function secureContext(context: BrowserContext) {
   // tsx/esbuild always compiles this project with keepNames enabled, which wraps named
@@ -63,6 +79,7 @@ async function extract(page: Page): Promise<ExtractedPage> {
       landmarks: { hasNav: Boolean(document.querySelector("nav")), hasFooter: Boolean(document.querySelector("footer")), hasMain: Boolean(document.querySelector("main")) },
       trustSignals,
       domSummary: { elements: document.querySelectorAll("*").length, images: document.images.length, buttons: document.querySelectorAll("button").length, links: document.links.length, forms: document.forms.length },
+      cookieBanner: { detected: false, dismissed: false },
     };
   });
 }
@@ -73,15 +90,16 @@ async function testCtaJourneys(context: BrowserContext, sourceUrl: string, ctas:
   return Promise.all(candidates.map(async (cta) => {
     const destination = new URL(cta.href, source);
     const sameOrigin = destination.origin === source.origin;
-    if (!sameOrigin) return { text: cta.text, destination: destination.toString(), outcome: "External destination detected", sameOrigin };
+    if (!sameOrigin) return { text: cta.text, destination: destination.toString(), outcome: "External destination detected", sameOrigin, screenshot: undefined as Buffer | undefined };
     const probe = await context.newPage();
     try {
       const response = await probe.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
       await assertSafeUrl(probe.url());
       const title = await probe.title();
-      return { text: cta.text, destination: probe.url(), outcome: response?.ok() ? `Loaded: ${title || response.status()}` : `HTTP ${response?.status() ?? "error"}`, sameOrigin };
+      const screenshot = response?.ok() ? Buffer.from(await probe.screenshot({ type: "jpeg", quality: 70 })) : undefined;
+      return { text: cta.text, destination: probe.url(), outcome: response?.ok() ? `Loaded: ${title || response.status()}` : `HTTP ${response?.status() ?? "error"}`, sameOrigin, screenshot };
     } catch (error) {
-      return { text: cta.text, destination: destination.toString(), outcome: error instanceof Error ? error.message.slice(0, 120) : "Could not load", sameOrigin };
+      return { text: cta.text, destination: destination.toString(), outcome: error instanceof Error ? error.message.slice(0, 120) : "Could not load", sameOrigin, screenshot: undefined as Buffer | undefined };
     } finally { await probe.close(); }
   }));
 }
@@ -110,8 +128,14 @@ export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult>
     const desktopPage = await desktop.newPage();
     await settle(desktopPage, url);
     await assertSafeUrl(desktopPage.url());
+    const cookieDismissedDesktop = await dismissCookieBanner(desktopPage);
     const pageData = await extract(desktopPage);
-    pageData.ctaJourneys = await testCtaJourneys(desktop, pageData.url, pageData.ctas);
+    pageData.cookieBanner = { detected: cookieDismissedDesktop, dismissed: cookieDismissedDesktop };
+    const ctaResults = await testCtaJourneys(desktop, pageData.url, pageData.ctas);
+    pageData.ctaJourneys = ctaResults.map((result) => ({ text: result.text, destination: result.destination, outcome: result.outcome, sameOrigin: result.sameOrigin }));
+    const ctaScreenshots = ctaResults
+      .map((result, index) => ({ index, buffer: result.screenshot }))
+      .filter((entry): entry is { index: number; buffer: Buffer } => Boolean(entry.buffer));
     await addAnnotations(desktopPage, pageData.ctas);
     const desktopScreenshot = await desktopPage.screenshot({ fullPage: true, type: "jpeg", quality: 78 });
     await desktop.close();
@@ -121,9 +145,10 @@ export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult>
     const mobilePage = await mobile.newPage();
     await settle(mobilePage, pageData.url);
     await assertSafeUrl(mobilePage.url());
+    await dismissCookieBanner(mobilePage);
     await addAnnotations(mobilePage, pageData.ctas);
     const mobileScreenshot = await mobilePage.screenshot({ fullPage: true, type: "jpeg", quality: 75 });
     await mobile.close();
-    return { page: pageData, desktopScreenshot: Buffer.from(desktopScreenshot), mobileScreenshot: Buffer.from(mobileScreenshot) };
+    return { page: pageData, desktopScreenshot: Buffer.from(desktopScreenshot), mobileScreenshot: Buffer.from(mobileScreenshot), ctaScreenshots };
   } finally { await browser.close(); }
 }

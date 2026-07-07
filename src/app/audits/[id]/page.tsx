@@ -14,7 +14,7 @@ export default async function AuditPage({ params }: { params: Promise<{ id: stri
   }
   if (!audit) notFound();
   if (audit.status !== "completed" || !audit.report || !audit.metrics) {
-    const pendingStatus = audit.status === "failed" ? "failed" : audit.status === "running" ? "running" : "pending";
+    const pendingStatus = audit.status === "failed" ? "failed" : audit.status === "running" ? "running" : audit.paid ? "pending" : "unpaid";
     return <AuditPending id={audit.id} initialStatus={pendingStatus} errorMessage={audit.errorMessage} />;
   }
   return <ReportView audit={audit} />;

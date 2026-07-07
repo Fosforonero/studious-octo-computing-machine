@@ -2,7 +2,7 @@ import { getSupabaseAdmin } from "@/lib/db/client";
 import type { AuditMetrics, AuditRecord, ExtractedPage, FinalReport } from "@/lib/audit/types";
 
 function mapAudit(row: Record<string, unknown>): AuditRecord {
-  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
+  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
 }
 
 export async function createAudit(url: string, normalizedUrl: string, pageGoal: string) {
@@ -46,6 +46,11 @@ export async function saveScan(auditId: string, page: ExtractedPage, metrics: Au
 
 export async function completeAudit(auditId: string, report: FinalReport) {
   const { error } = await getSupabaseAdmin().rpc("complete_audit", { p_audit_id: auditId, p_report: report, p_executive_summary: report.executiveSummary, p_overall_score: report.overallScore });
+  if (error) throw error;
+}
+
+export async function markAuditPaid(auditId: string, stripeCheckoutSessionId: string) {
+  const { error } = await getSupabaseAdmin().from("audits").update({ paid: true, stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId);
   if (error) throw error;
 }
 

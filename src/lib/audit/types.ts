@@ -10,13 +10,14 @@ export interface ExtractedPage {
   headings: { level: number; text: string }[];
   visibleText: string;
   ctas: { text: string; href: string; tag: string }[];
-  ctaJourneys: { text: string; destination: string; outcome: string; sameOrigin: boolean }[];
+  ctaJourneys: { text: string; destination: string; outcome: string; sameOrigin: boolean; screenshotPath?: string }[];
   links: { text: string; href: string }[];
   forms: { action: string; inputs: string[] }[];
   aboveFold: { text: string; ctas: string[]; imageCount: number };
   landmarks: { hasNav: boolean; hasFooter: boolean; hasMain: boolean };
   trustSignals: string[];
   domSummary: { elements: number; images: number; buttons: number; links: number; forms: number };
+  cookieBanner: { detected: boolean; dismissed: boolean };
   desktopScreenshotPath?: string;
   mobileScreenshotPath?: string;
 }
@@ -52,7 +53,7 @@ export interface ExpertReport {
   quickWins: string[];
 }
 
-export interface CopySuggestion { label: "headline" | "subheadline" | "cta" | "hero"; before: string; after: string; rationale: string; }
+export interface CopySuggestion { label: "headline" | "subheadline" | "cta" | "hero"; before: string; after: string; alternative: string; rationale: string; }
 
 export interface FinalReport {
   overallScore: number;
@@ -70,6 +71,7 @@ export interface AuditRecord {
   normalizedUrl: string;
   pageGoal: string;
   status: AuditStatus;
+  paid: boolean;
   overallScore: number | null;
   createdAt: string;
   completedAt: string | null;
