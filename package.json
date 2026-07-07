@@ -1,0 +1,40 @@
+{
+  "name": "lensiq",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "worker": "tsx scripts/audit-worker.ts",
+    "worker:once": "tsx scripts/audit-worker.ts --once",
+    "playwright:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.52.1",
+    "@tailwindcss/postcss": "^4.1.11",
+    "chrome-launcher": "^1.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lighthouse": "^12.8.2",
+    "lucide-react": "^0.525.0",
+    "next": "16.2.10",
+    "playwright": "^1.54.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "tailwind-merge": "^3.3.0",
+    "zod": "^4.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "tailwindcss": "^4.1.11",
+    "tsx": "^4.20.3",
+    "typescript": "^5"
+  }
+}
