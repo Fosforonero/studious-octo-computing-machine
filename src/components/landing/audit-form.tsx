@@ -19,9 +19,10 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
     setError("");
     try {
       const response = await fetch("/api/audits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, pageGoal }) });
-      const data = await response.json() as { id?: string; error?: string };
+      const data = await response.json() as { id?: string; error?: string; checkoutUrl?: string | null };
       if (!response.ok || !data.id) throw new Error(data.error ?? "Could not start the audit.");
-      router.push(`/audits/${data.id}`);
+      if (data.checkoutUrl) window.location.href = data.checkoutUrl;
+      else router.push(`/audits/${data.id}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Something went wrong.");
       setPending(false);

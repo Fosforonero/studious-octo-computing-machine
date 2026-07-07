@@ -2,7 +2,7 @@ import { claimNextAudit, completeAudit, failAudit, saveScan } from "@/lib/db/aud
 import { scanHomepage } from "@/lib/audit/browser-scanner";
 import { runLighthouse } from "@/lib/audit/lighthouse-scanner";
 import { generateReport } from "@/lib/audit/generate-report";
-import { uploadScreenshots } from "@/lib/storage/screenshots";
+import { uploadCtaScreenshots, uploadScreenshots } from "@/lib/storage/screenshots";
 
 export async function processNextAudit() {
   const audit = await claimNextAudit();
@@ -13,6 +13,8 @@ export async function processNextAudit() {
     const screenshots = await uploadScreenshots(audit.id, browserResult.desktopScreenshot, browserResult.mobileScreenshot);
     browserResult.page.desktopScreenshotPath = screenshots.desktop;
     browserResult.page.mobileScreenshotPath = screenshots.mobile;
+    const ctaScreenshots = await uploadCtaScreenshots(audit.id, browserResult.ctaScreenshots);
+    for (const { index, path } of ctaScreenshots) browserResult.page.ctaJourneys[index].screenshotPath = path;
     await saveScan(audit.id, browserResult.page, metrics, screenshots);
     const report = await generateReport(browserResult.page, metrics, audit.pageGoal);
     await completeAudit(audit.id, report);

@@ -18,12 +18,13 @@ It is not positioned as a crawler full of warnings or as a generic SEO score. Th
 
 ## Commercial path
 
-The first paid shape should stay simple:
+No free tier. Every audit is a one-time purchase, no subscription, no account required:
 
-- Free snapshot: overall score, evidence preview and two priority findings.
-- Full audit: complete specialist report, annotated evidence, copy rewrites and implementation plan.
-- Three-audit pack: useful for homepage/pricing/signup or before/change/after cycles.
-- Later team plan: saved sites, scheduled checks, comparisons, tasks and shareable client reports.
+- Single audit: $29. Complete specialist report, annotated evidence, copy rewrites and implementation plan.
+- Three-audit pack: $79 (vs $87 at single-audit price). Useful for homepage/pricing/signup or before/change/after cycles.
+- Later team plan: saved sites, scheduled checks, comparisons, tasks and shareable client reports. Requires real accounts (Supabase Auth); deliberately deferred until the single-audit path is validated.
+
+The durable advantage is not a bigger checklist. It is the history of what changed, why it changed and whether the next scan improved.
 
 The durable advantage is not a bigger checklist. It is the history of what changed, why it changed and whether the next scan improved.
 

@@ -76,3 +76,21 @@ button, input { font: inherit; }
   .signal-area { opacity: 1; }
   .signal-bar { transform: scaleY(1); }
 }
+
+/* Scoped, lighter palette for the report page — overrides the shared tokens only within .report-theme, so the marketing site's brand colors are untouched. */
+.report-theme {
+  --background: #f4f6f7;
+  --foreground: #12181d;
+  --card: #ffffff;
+  --muted: #e8edf0;
+  --muted-foreground: #57646d;
+  --primary: #0d6b73;
+  --primary-foreground: #ffffff;
+  --border: rgba(18, 24, 29, 0.12);
+  --accent: #0d6b73;
+  --accent-secondary: #0a565c;
+  --accent-soft: #dcedee;
+  --deep: #0e1417;
+}
+.report-theme .hero-glow { background: radial-gradient(circle at 78% 30%, rgba(13,107,115,.16), transparent 32%), radial-gradient(circle at 15% 15%, rgba(13,107,115,.08), transparent 34%), var(--deep); }
+.report-theme .eyebrow::before { box-shadow: 0 0 18px rgba(13,107,115,.55); }

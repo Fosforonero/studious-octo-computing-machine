@@ -14,3 +14,17 @@ export async function uploadScreenshots(auditId: string, desktop: Buffer, mobile
   const { data: mobileUrl } = db.storage.from(bucket).getPublicUrl(mobilePath);
   return { desktop: desktopUrl.publicUrl, mobile: mobileUrl.publicUrl };
 }
+
+export async function uploadCtaScreenshots(auditId: string, screenshots: { index: number; buffer: Buffer }[]) {
+  if (!screenshots.length) return [];
+  const bucket = process.env.SUPABASE_SCREENSHOTS_BUCKET ?? "audit-screenshots";
+  const db = getSupabaseAdmin();
+  const results = await Promise.all(screenshots.map(async ({ index, buffer }) => {
+    const path = `${auditId}/cta-${index}.jpg`;
+    const { error } = await db.storage.from(bucket).upload(path, buffer, { contentType: "image/jpeg", upsert: true });
+    if (error) throw error;
+    const { data } = db.storage.from(bucket).getPublicUrl(path);
+    return { index, path: data.publicUrl };
+  }));
+  return results;
+}
