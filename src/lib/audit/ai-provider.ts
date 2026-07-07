@@ -1,5 +1,5 @@
 export interface AiRequestOptions {
-  provider?: "openai" | "anthropic";
+  provider?: "openai" | "anthropic" | "openrouter";
   model?: string;
   imageUrls?: string[];
   reasoningEffort?: "low" | "medium" | "high";
@@ -36,14 +36,41 @@ class AnthropicProvider implements AiProvider {
   }
 }
 
+class OpenRouterProvider implements AiProvider {
+  async json<T>(system: string, input: string, options: AiRequestOptions = {}) {
+    const content: unknown[] = [{ type: "text", text: input }];
+    for (const imageUrl of options.imageUrls ?? []) content.push({ type: "image_url", image_url: { url: imageUrl } });
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "content-type": "application/json", "HTTP-Referer": "https://lensiq.site", "X-Title": "Lensiq" },
+      body: JSON.stringify({
+        model: options.model ?? process.env.OPENROUTER_EXPERT_MODEL ?? "openai/gpt-5.4-mini",
+        messages: [{ role: "system", content: system }, { role: "user", content }],
+        response_format: { type: "json_object" },
+        ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(`OpenRouter request failed (${response.status}): ${await response.text()}`);
+    const body = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const text = body.choices?.[0]?.message?.content;
+    if (!text) throw new Error("OpenRouter response did not include any content.");
+    return parseJson<T>(text);
+  }
+}
+
 let openAiProvider: AiProvider | null = null;
 let anthropicProvider: AiProvider | null = null;
-export function getAiProvider(requested?: "openai" | "anthropic") {
+let openRouterProvider: AiProvider | null = null;
+export function getAiProvider(requested?: "openai" | "anthropic" | "openrouter") {
   const selected = requested ?? process.env.AI_PROVIDER ?? (process.env.OPENAI_API_KEY ? "openai" : "anthropic");
   if (selected === "anthropic") {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is missing.");
     anthropicProvider ??= new AnthropicProvider();
     return anthropicProvider;
+  } else if (selected === "openrouter") {
+    if (!process.env.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is missing.");
+    openRouterProvider ??= new OpenRouterProvider();
+    return openRouterProvider;
   } else {
     if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is missing.");
     openAiProvider ??= new OpenAiProvider();
