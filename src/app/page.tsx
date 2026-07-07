@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Mail, Sparkles } from "lucide-react";
 import { Brand } from "@/components/brand";
 import { Badge } from "@/components/ui/badge";
@@ -111,8 +112,13 @@ export default function ComingSoonPage() {
           </div>
         </section>
 
-        <footer className="border-t border-white/10 py-6 text-xs text-white/45">
-          © 2026 Lensiq. Your website, seen clearly.
+        <footer className="flex flex-col gap-3 border-t border-white/10 py-6 text-xs text-white/45 sm:flex-row sm:items-center sm:justify-between">
+          <span>© 2026 Lensiq. Your website, seen clearly.</span>
+          <div className="flex gap-5">
+            <Link href="/privacy" className="hover:text-white/70">Privacy</Link>
+            <Link href="/cookies" className="hover:text-white/70">Cookies</Link>
+            <Link href="/terms" className="hover:text-white/70">Terms</Link>
+          </div>
         </footer>
       </div>
     </main>
