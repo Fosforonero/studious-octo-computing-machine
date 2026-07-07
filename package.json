@@ -8,8 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "worker": "tsx scripts/audit-worker.ts",
-    "worker:once": "tsx scripts/audit-worker.ts --once",
+    "build:worker": "esbuild scripts/audit-worker.ts --bundle --platform=node --format=cjs --outfile=dist/audit-worker.cjs --external:playwright --external:lighthouse --external:chrome-launcher --external:@supabase/supabase-js --external:zod --tsconfig=tsconfig.json",
+    "worker": "npm run build:worker && node dist/audit-worker.cjs",
+    "worker:once": "npm run build:worker && node dist/audit-worker.cjs --once",
     "playwright:install": "playwright install chromium"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "tailwindcss": "^4.1.11",
