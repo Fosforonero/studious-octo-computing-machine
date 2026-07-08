@@ -3,7 +3,7 @@ import { claimCheckoutSession, getAudit } from "@/lib/db/audits";
 
 export interface CheckoutResult { url: string | null; alreadyPaid: boolean; }
 
-function createSession(auditId: string) {
+function createSession(auditId: string, idempotencyKey: string) {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://lensiq.site";
   return getStripe().checkout.sessions.create({
     mode: "payment",
@@ -11,7 +11,7 @@ function createSession(auditId: string) {
     success_url: `${appUrl}/audits/${auditId}?checkout=success`,
     cancel_url: `${appUrl}/audits/${auditId}?checkout=cancelled`,
     metadata: { auditId },
-  });
+  }, { idempotencyKey });
 }
 
 // At most one open, payable Checkout Session per unpaid audit — reuses an existing open
@@ -24,15 +24,20 @@ export async function getOrCreateCheckoutSession(auditId: string): Promise<Check
   if (!audit) throw new Error("Audit not found.");
   if (audit.paid) return { url: null, alreadyPaid: true };
 
+  let idempotencyKey = `audit-checkout-${auditId}-initial`;
+  let previousSessionId: string | null = null;
   if (audit.stripeCheckoutSessionId) {
     const existing = await getStripe().checkout.sessions.retrieve(audit.stripeCheckoutSessionId);
     if (existing.status === "open") return { url: existing.url, alreadyPaid: false };
     if (existing.status === "complete") return { url: null, alreadyPaid: true };
-    // status === "expired": fall through and create a replacement session.
+    // status === "expired": fall through and create a replacement session, keyed off the
+    // expired session's id so retries of this same replacement don't spawn duplicates.
+    idempotencyKey = `audit-checkout-${auditId}-after-${existing.id}`;
+    previousSessionId = existing.id;
   }
 
-  const session = await createSession(auditId);
-  const claimed = await claimCheckoutSession(auditId, session.id);
+  const session = await createSession(auditId, idempotencyKey);
+  const claimed = await claimCheckoutSession(auditId, session.id, previousSessionId);
   if (claimed) return { url: session.url, alreadyPaid: false };
 
   // Lost the race — another request already recorded a session first. Reuse theirs.
@@ -41,6 +46,7 @@ export async function getOrCreateCheckoutSession(auditId: string): Promise<Check
   if (winner?.stripeCheckoutSessionId) {
     const winnerSession = await getStripe().checkout.sessions.retrieve(winner.stripeCheckoutSessionId);
     if (winnerSession.status === "open") return { url: winnerSession.url, alreadyPaid: false };
+    if (winnerSession.status === "complete") return { url: null, alreadyPaid: true };
   }
   return { url: session.url, alreadyPaid: false };
 }

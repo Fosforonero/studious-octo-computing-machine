@@ -57,8 +57,10 @@ export async function markAuditPaid(auditId: string, stripeCheckoutSessionId: st
 // Conditional claim: only succeeds if no session was recorded yet, so two concurrent
 // requests creating a session for the same unpaid audit can't both "win" and leave two
 // payable sessions open — the loser re-fetches and reuses whichever session won.
-export async function claimCheckoutSession(auditId: string, stripeCheckoutSessionId: string): Promise<boolean> {
-  const { data, error } = await getSupabaseAdmin().from("audits").update({ stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId).is("stripe_checkout_session_id", null).select("id");
+export async function claimCheckoutSession(auditId: string, stripeCheckoutSessionId: string, previousSessionId: string | null = null): Promise<boolean> {
+  let query = getSupabaseAdmin().from("audits").update({ stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId);
+  query = previousSessionId === null ? query.is("stripe_checkout_session_id", null) : query.eq("stripe_checkout_session_id", previousSessionId);
+  const { data, error } = await query.select("id");
   if (error) throw error;
   return Boolean(data && data.length > 0);
 }
