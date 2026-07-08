@@ -4,10 +4,12 @@ import { claimCheckoutSession, getAudit } from "@/lib/db/audits";
 export interface CheckoutResult { url: string | null; alreadyPaid: boolean; }
 
 function createSession(auditId: string, idempotencyKey: string) {
+  const priceId = process.env.STRIPE_PRICE_SINGLE_AUDIT;
+  if (!priceId) throw new Error("STRIPE_PRICE_SINGLE_AUDIT is missing.");
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://lensiq.site";
   return getStripe().checkout.sessions.create({
     mode: "payment",
-    line_items: [{ price_data: { currency: "usd", unit_amount: 2900, product_data: { name: "Lensiq full audit report" } }, quantity: 1 }],
+    line_items: [{ price: priceId, quantity: 1 }],
     success_url: `${appUrl}/audits/${auditId}?checkout=success`,
     cancel_url: `${appUrl}/audits/${auditId}?checkout=cancelled`,
     metadata: { auditId },
