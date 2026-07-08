@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createAudit } from "@/lib/db/audits";
 import { assertSafeUrl } from "@/lib/security/url";
-import { createCheckoutSession } from "@/lib/stripe/checkout";
+import { getOrCreateCheckoutSession } from "@/lib/stripe/checkout";
 
 const requestSchema = z.object({ url: z.string().trim().min(3).max(2048), pageGoal: z.enum(["get-leads", "book-demos", "sell", "signups", "inform"]) });
 
@@ -25,11 +25,11 @@ export async function POST(request: Request) {
     const audit = await createAudit(body.url, normalizedUrl, body.pageGoal);
     let checkoutUrl: string | null = null;
     try {
-      const session = await createCheckoutSession(audit.id);
-      checkoutUrl = session.url;
+      const result = await getOrCreateCheckoutSession(audit.id);
+      checkoutUrl = result.url;
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (!message.includes("STRIPE_SECRET_KEY is missing")) console.error("[api/audits] createCheckoutSession failed", error);
+      if (!message.includes("STRIPE_SECRET_KEY is missing")) console.error("[api/audits] getOrCreateCheckoutSession failed", error);
     }
     return NextResponse.json({ id: audit.id, status: audit.status, checkoutUrl }, { status: 202 });
   } catch (error) {
