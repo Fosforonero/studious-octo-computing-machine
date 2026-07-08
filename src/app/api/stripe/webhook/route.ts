@@ -23,6 +23,10 @@ export async function POST(request: Request) {
         console.error(`[api/stripe/webhook] markAuditPaid failed for ${auditId}`, error);
       }
     }
+  } else if (event.type === "checkout.session.expired") {
+    const session = event.data.object as Stripe.Checkout.Session;
+    const auditId = session.metadata?.auditId;
+    console.log(`[api/stripe/webhook] checkout session expired for audit ${auditId ?? "unknown"}`);
   }
 
   return NextResponse.json({ received: true });

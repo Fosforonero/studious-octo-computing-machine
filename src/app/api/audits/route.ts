@@ -29,7 +29,7 @@ export async function POST(request: Request) {
       checkoutUrl = result.url;
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (!message.includes("STRIPE_SECRET_KEY is missing")) console.error("[api/audits] getOrCreateCheckoutSession failed", error);
+      if (!message.includes("STRIPE_SECRET_KEY is missing") && !message.includes("STRIPE_PRICE_SINGLE_AUDIT is missing")) console.error("[api/audits] getOrCreateCheckoutSession failed", error);
     }
     return NextResponse.json({ id: audit.id, status: audit.status, checkoutUrl }, { status: 202 });
   } catch (error) {
