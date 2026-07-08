@@ -2,7 +2,7 @@ import { getSupabaseAdmin } from "@/lib/db/client";
 import type { AuditMetrics, AuditRecord, ExtractedPage, FinalReport } from "@/lib/audit/types";
 
 function mapAudit(row: Record<string, unknown>): AuditRecord {
-  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
+  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), stripeCheckoutSessionId: (row.stripe_checkout_session_id as string | null) ?? null, overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
 }
 
 export async function createAudit(url: string, normalizedUrl: string, pageGoal: string) {
@@ -52,6 +52,15 @@ export async function completeAudit(auditId: string, report: FinalReport) {
 export async function markAuditPaid(auditId: string, stripeCheckoutSessionId: string) {
   const { error } = await getSupabaseAdmin().from("audits").update({ paid: true, stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId);
   if (error) throw error;
+}
+
+// Conditional claim: only succeeds if no session was recorded yet, so two concurrent
+// requests creating a session for the same unpaid audit can't both "win" and leave two
+// payable sessions open — the loser re-fetches and reuses whichever session won.
+export async function claimCheckoutSession(auditId: string, stripeCheckoutSessionId: string): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin().from("audits").update({ stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId).is("stripe_checkout_session_id", null).select("id");
+  if (error) throw error;
+  return Boolean(data && data.length > 0);
 }
 
 export async function failAudit(auditId: string, cause: unknown) {

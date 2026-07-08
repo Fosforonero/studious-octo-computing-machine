@@ -72,6 +72,7 @@ export interface AuditRecord {
   pageGoal: string;
   status: AuditStatus;
   paid: boolean;
+  stripeCheckoutSessionId: string | null;
   overallScore: number | null;
   createdAt: string;
   completedAt: string | null;
