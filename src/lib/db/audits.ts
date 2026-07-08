@@ -5,8 +5,8 @@ function mapAudit(row: Record<string, unknown>): AuditRecord {
   return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), stripeCheckoutSessionId: (row.stripe_checkout_session_id as string | null) ?? null, overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
 }
 
-export async function createAudit(url: string, normalizedUrl: string, pageGoal: string) {
-  const { data, error } = await getSupabaseAdmin().from("audits").insert({ url, normalized_url: normalizedUrl, page_goal: pageGoal, status: "pending" }).select("*").single();
+export async function createAudit(url: string, normalizedUrl: string, pageGoal: string, userId: string | null = null) {
+  const { data, error } = await getSupabaseAdmin().from("audits").insert({ url, normalized_url: normalizedUrl, page_goal: pageGoal, status: "pending", user_id: userId }).select("*").single();
   if (error) throw error;
   return mapAudit(data);
 }
