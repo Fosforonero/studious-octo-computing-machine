@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createAudit } from "@/lib/db/audits";
 import { assertSafeUrl } from "@/lib/security/url";
 import { getOrCreateCheckoutSession } from "@/lib/stripe/checkout";
+import { createClient } from "@/lib/supabase/server";
 
 const requestSchema = z.object({ url: z.string().trim().min(3).max(2048), pageGoal: z.enum(["get-leads", "book-demos", "sell", "signups", "inform"]) });
 
@@ -21,8 +22,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Enter a valid website URL." }, { status: 400 });
   }
 
+  const supabase = await createClient();
+  const { data: claims } = await supabase.auth.getClaims();
+  const userId = (claims?.claims.sub as string | undefined) ?? null;
+
   try {
-    const audit = await createAudit(body.url, normalizedUrl, body.pageGoal);
+    const audit = await createAudit(body.url, normalizedUrl, body.pageGoal, userId);
     let checkoutUrl: string | null = null;
     try {
       const result = await getOrCreateCheckoutSession(audit.id);
