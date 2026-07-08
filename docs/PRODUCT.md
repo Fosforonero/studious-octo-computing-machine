@@ -20,7 +20,8 @@ It is not positioned as a crawler full of warnings or as a generic SEO score. Th
 
 No free tier. Every audit is a one-time purchase, no subscription, no account required:
 
-- Single audit: $29. Complete specialist report, annotated evidence, copy rewrites and implementation plan.
+- Founding audit price: $9.99 for the first 100 audits, framed as a private-beta offer ("Help shape Lensiq before public launch"), not a discount. Same complete report as the standard audit. Guarantee: refund if the report doesn't include at least 3 actionable fixes. Manually tracked for now — see the "founder offer cap" follow-up task for a real DB-backed counter.
+- Single audit (standard price, once the first 100 founding audits are used up): $29. Complete specialist report, annotated evidence, copy rewrites and implementation plan.
 - Three-audit pack: $79 (vs $87 at single-audit price). Useful for homepage/pricing/signup or before/change/after cycles.
 - Later team plan: saved sites, scheduled checks, comparisons, tasks and shareable client reports. Requires real accounts (Supabase Auth); deliberately deferred until the single-audit path is validated.
 
