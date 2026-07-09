@@ -12,7 +12,7 @@ export default function manifest(): MetadataRoute.Manifest {
     icons: [
       {
         src: "/lensiq-favicon.webp",
-        sizes: "431x430",
+        sizes: "386x386",
         type: "image/webp",
       },
       {
