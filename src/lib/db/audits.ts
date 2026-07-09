@@ -2,12 +2,20 @@ import { getSupabaseAdmin } from "@/lib/db/client";
 import type { AuditMetrics, AuditRecord, ExtractedPage, FinalReport } from "@/lib/audit/types";
 
 function mapAudit(row: Record<string, unknown>): AuditRecord {
-  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), stripeCheckoutSessionId: (row.stripe_checkout_session_id as string | null) ?? null, overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
+  return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), stripeCheckoutSessionId: (row.stripe_checkout_session_id as string | null) ?? null, userId: (row.user_id as string | null) ?? null, overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
 }
 
-export async function createAudit(url: string, normalizedUrl: string, pageGoal: string, userId: string | null = null) {
-  const { data, error } = await getSupabaseAdmin().from("audits").insert({ url, normalized_url: normalizedUrl, page_goal: pageGoal, status: "pending", user_id: userId }).select("*").single();
-  if (error) throw error;
+export async function createAudit(url: string, normalizedUrl: string, pageGoal: string, userId: string | null = null, id?: string) {
+  const payload: Record<string, unknown> = { url, normalized_url: normalizedUrl, page_goal: pageGoal, status: "pending", user_id: userId };
+  if (id) payload.id = id;
+  const { data, error } = await getSupabaseAdmin().from("audits").insert(payload).select("*").single();
+  if (error) {
+    if (error.code === "23505" && id) {
+      const existing = await getAudit(id);
+      if (existing) return existing;
+    }
+    throw error;
+  }
   return mapAudit(data);
 }
 
@@ -61,6 +69,15 @@ export async function claimCheckoutSession(auditId: string, stripeCheckoutSessio
   let query = getSupabaseAdmin().from("audits").update({ stripe_checkout_session_id: stripeCheckoutSessionId }).eq("id", auditId);
   query = previousSessionId === null ? query.is("stripe_checkout_session_id", null) : query.eq("stripe_checkout_session_id", previousSessionId);
   const { data, error } = await query.select("id");
+  if (error) throw error;
+  return Boolean(data && data.length > 0);
+}
+
+// Conditional claim: only succeeds if the audit is still unowned, so a forged or
+// stale pending-audit cookie can never reassign an audit that already belongs to
+// someone else — see claimPendingAudit in src/lib/audit/pending-claim.ts.
+export async function claimAuditOwnership(auditId: string, userId: string): Promise<boolean> {
+  const { data, error } = await getSupabaseAdmin().from("audits").update({ user_id: userId }).eq("id", auditId).is("user_id", null).select("id");
   if (error) throw error;
   return Boolean(data && data.length > 0);
 }

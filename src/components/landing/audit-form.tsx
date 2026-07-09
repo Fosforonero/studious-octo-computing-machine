@@ -6,7 +6,16 @@ import { ArrowRight, LoaderCircle, LockKeyhole } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
-export function AuditForm({ compact = false }: { compact?: boolean }) {
+type SubmitResult = { redirect: string } | { error: string };
+
+async function defaultSubmit(url: string, pageGoal: string): Promise<SubmitResult> {
+  const response = await fetch("/api/audits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, pageGoal }) });
+  const data = await response.json() as { id?: string; error?: string; checkoutUrl?: string | null };
+  if (!response.ok || !data.id) return { error: data.error ?? "Could not start the audit." };
+  return { redirect: data.checkoutUrl ?? `/audits/${data.id}` };
+}
+
+export function AuditForm({ compact = false, onSubmit, helperText, ctaLabel = "Run free audit" }: { compact?: boolean; onSubmit?: (url: string, pageGoal: string) => Promise<SubmitResult>; helperText?: string; ctaLabel?: string }) {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [pageGoal, setPageGoal] = useState("get-leads");
@@ -18,11 +27,10 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
     setPending(true);
     setError("");
     try {
-      const response = await fetch("/api/audits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, pageGoal }) });
-      const data = await response.json() as { id?: string; error?: string; checkoutUrl?: string | null };
-      if (!response.ok || !data.id) throw new Error(data.error ?? "Could not start the audit.");
-      if (data.checkoutUrl) window.location.href = data.checkoutUrl;
-      else router.push(`/audits/${data.id}`);
+      const result = await (onSubmit ?? defaultSubmit)(url, pageGoal);
+      if ("error" in result) throw new Error(result.error);
+      if (result.redirect.startsWith("http")) window.location.href = result.redirect;
+      else router.push(result.redirect);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Something went wrong.");
       setPending(false);
@@ -40,10 +48,10 @@ export function AuditForm({ compact = false }: { compact?: boolean }) {
         <option value="signups">Drive signups</option>
         <option value="inform">Explain / inform</option>
       </select>
-      <Button size="lg" className="h-13 shrink-0" disabled={pending} aria-label={pending ? "Starting your audit" : undefined}>{pending ? <LoaderCircle className="size-4 animate-spin" /> : <>Run free audit <ArrowRight className="size-4" /></>}</Button>
+      <Button size="lg" className="h-13 shrink-0" disabled={pending} aria-label={pending ? "Starting your audit" : undefined}>{pending ? <LoaderCircle className="size-4 animate-spin" /> : <>{ctaLabel} <ArrowRight className="size-4" /></>}</Button>
     </div>
     <div className={`mt-3 flex items-center ${error ? "justify-between" : "justify-center"} gap-3 text-xs ${compact ? "text-muted-foreground" : "text-white/55"}`}>
-      <span className="inline-flex items-center gap-1.5"><LockKeyhole className="size-3" /> No signup · Homepage only · About 2 minutes</span>
+      <span className="inline-flex items-center gap-1.5"><LockKeyhole className="size-3" /> {helperText ?? "No signup · Homepage only · About 2 minutes"}</span>
       {error && <span role="alert" className="font-bold text-red-400">{error}</span>}
     </div>
   </form>;
