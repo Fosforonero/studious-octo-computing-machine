@@ -84,7 +84,7 @@ export default function PrivacyPage() {
                 and safeguards for each provider&apos;s international transfers will be verified and documented here
                 before public launch.
               </li>
-              <li><strong className="text-foreground">Google Analytics (GA4)</strong> — aggregate usage analytics for lensiq.site, only after you accept analytics cookies. See our <Link href="/cookies" className="font-bold text-foreground underline">Cookie Policy</Link>.</li>
+              <li><strong className="text-foreground">Google Analytics (GA4)</strong> — usage analytics for lensiq.site, only after you accept analytics cookies. See our <Link href="/cookies" className="font-bold text-foreground underline">Cookie Policy</Link>.</li>
             </ul>
           </section>
 
