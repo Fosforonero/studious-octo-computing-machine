@@ -31,6 +31,14 @@ Supabase service-role client, existing zod validation. No new dependencies.
 - Out of scope entirely: worker, Stripe webhook, the $29/founder pricing copy, landing page, legal pages, cookie banner, AI pipeline, screenshot storage, returning the user to the original page after login.
 - No raw SQL against the database at any point, including for test data — every row used in verification is created through existing, already-tested application functions (`createAudit`, `saveScan`, `completeAudit`, the live `POST /api/audits` endpoint, `supabase.auth.admin` methods). Cleanup deletes may use the Supabase admin client directly (parameterized `.delete().eq("id", ...)`, not SQL text) since that's tidying up legitimately-created rows, not fabricating test conditions.
 - No benchmark or competitor references in code, commits, or docs.
+- `supabase.auth.getClaims()` returns `{ data, error }` — it does not only throw. Every call site checks both: a thrown exception (`try/catch`) **and** a returned, non-null `error` (`if (error) { ... }`) are both treated as "no session," logging only `error.message`, never the full error object, a JWT, or a cookie.
+- `getOwnedAuditFull`'s three child-table queries (`audit_pages`, `audit_metrics`, `audit_reports`) each carry their own `{ data, error }` — every one of the three `error`s is checked and propagated (thrown) if present. Only a clean `data: null` with **no** error on all three is allowed to become "missing data" / feed into `auditDataIsInconsistent`.
+- Test fixtures: use four separately named audits, never the same audit for two different assertions that would contradict each other — `completedAuditId` (report render only), `ownerCheckoutAuditId` (the one legitimate owner checkout), `attackAuditId` (never touched by any successful checkout call, used only for the other-user/anonymous denial checks and to confirm `stripe_checkout_session_id` stays `null` before and after those attempts), `concurrencyAuditId` (a virgin audit whose *first ever* checkout call is the simultaneous double-tab test — reusing an audit that already has a session would only prove retrieval of an existing session, not the creation race).
+- No access token, of any test user, is ever printed to a log or interpolated into a shell command. The full result of any setup script (including tokens) is written to a temporary file created with `0600` permissions; anything printed to the terminal is limited to emails, user ids, and audit ids. Any script that needs a token (cleanup's `signOut`) reads it from that file inside its own script body — never via shell string interpolation. Tokens, session passwords, and the fixture file itself are never committed.
+- The legacy audit id from Task 1 (and every id created by Task 9) is tracked in a temporary file, not written into this plan document or any commit.
+- If execution is interrupted or abandoned before Task 9's cleanup completes, delete every fixture row/user already created before stopping — no live test fixture is left in the database across an abandoned run.
+- Cleanup order matters: revoke sessions → delete every test audit row by id → confirm none remain → delete test users → confirm no orphaned rows/users remain → delete temp files and tear down containers. Deleting users before audits would (via the `user_id` foreign key's `on delete set null`) turn their audits into `user_id = null` rows first, and any failure partway through would leave freshly-created legacy rows behind — the opposite of what this sprint is trying to eliminate.
+- If a live security test fails during verification: stop immediately, do not clean up the failing evidence, and document the exact cause and state before making any fix. No automatic merge of this branch under any circumstance.
 
 ---
 
@@ -81,10 +89,17 @@ curl -s http://localhost:3100/api/audits/<uuid>
 Expected: the response body includes `"userId":null` (today's `GET` endpoint still
 returns the full mapped audit, including `userId` — that's exactly what Task 5 removes).
 
-- [ ] **Step 4: Record the id in this plan file**
+- [ ] **Step 4: Record the id in a temp file, not this plan**
 
-Edit this file: replace every occurrence of `LEGACY_AUDIT_ID_PLACEHOLDER` (in Task 9)
-with the `<uuid>` captured above.
+```bash
+echo -n "<uuid>" > /tmp/access-control-legacy-audit-id.txt
+chmod 600 /tmp/access-control-legacy-audit-id.txt
+```
+
+This id is never written into the plan document or a commit — Task 9 reads it back
+from this file. If execution stops anywhere before Task 9's cleanup runs, delete the
+row this id points to (via the same admin-client delete pattern Task 9 uses) before
+stopping, so no live fixture is left behind.
 
 - [ ] **Step 5: Stop the dev server**
 
@@ -94,12 +109,8 @@ docker compose down
 
 (`docker-compose.override.yml` stays on disk for now — Task 9 needs it again.)
 
-- [ ] **Step 6: Commit**
-
-```bash
-git add docs/superpowers/plans/2026-07-10-access-control-hardening.md
-git commit -m "Record legacy null-owner test fixture id for access control verification"
-```
+No commit for this task — nothing in the repository changes; the only artifact is the
+temp file read by Task 9.
 
 ---
 
@@ -135,11 +146,21 @@ export async function getOwnedAuditFull(id: string, userId: string): Promise<Aud
   const { data: row, error } = await db.from("audits").select("*").eq("id", id).eq("user_id", userId).maybeSingle();
   if (error) throw error;
   if (!row) return null;
-  const [{ data: page }, { data: metrics }, { data: report }] = await Promise.all([
+  const [pageResult, metricsResult, reportResult] = await Promise.all([
     db.from("audit_pages").select("*").eq("audit_id", id).maybeSingle(),
     db.from("audit_metrics").select("*").eq("audit_id", id).maybeSingle(),
     db.from("audit_reports").select("*").eq("audit_id", id).maybeSingle(),
   ]);
+  // Each of the three carries its own { data, error } — a failed child query is a real
+  // infrastructure error, not "this audit has no report yet," so it must propagate
+  // (throw) rather than silently read as missing data. Only a clean data: null with no
+  // error on all three is allowed to mean "not present."
+  if (pageResult.error) throw pageResult.error;
+  if (metricsResult.error) throw metricsResult.error;
+  if (reportResult.error) throw reportResult.error;
+  const { data: page } = pageResult;
+  const { data: metrics } = metricsResult;
+  const { data: report } = reportResult;
   const result = mapAudit(row);
   if (page) result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
   if (metrics) result.metrics = { performanceScore: metrics.performance_score, accessibilityScore: metrics.accessibility_score, seoScore: metrics.seo_score, bestPracticesScore: metrics.best_practices_score, lcp: metrics.lcp, cls: metrics.cls, inpOrTbt: metrics.inp_or_tbt, ttfb: metrics.ttfb, imageIssues: metrics.image_issues ?? [], renderBlockingResources: metrics.render_blocking_resources ?? 0, scriptWeightBytes: metrics.script_weight_bytes ?? 0 };
@@ -190,10 +211,17 @@ export async function resolveAuditAccess(id: string): Promise<AuditAccessResult>
   const supabase = await createClient();
   let userId: string | undefined;
   try {
-    const { data: claims } = await supabase.auth.getClaims();
-    userId = claims?.claims.sub as string | undefined;
+    const { data: claims, error } = await supabase.auth.getClaims();
+    if (error) {
+      // getClaims() returns { data, error } — a returned error is not the same as a
+      // thrown exception, and both must fail closed. Log only the message, never the
+      // full error object, a JWT, or a cookie.
+      console.error(`[audit-access] getClaims returned an error for ${id}`, error.message);
+    } else {
+      userId = claims?.claims.sub as string | undefined;
+    }
   } catch (error) {
-    console.error(`[audit-access] getClaims failed for ${id}`, error instanceof Error ? error.message : error);
+    console.error(`[audit-access] getClaims threw for ${id}`, error instanceof Error ? error.message : error);
   }
   if (!userId) return { kind: "unauthenticated" };
 
@@ -498,10 +526,14 @@ export async function POST(request: Request) {
   const supabase = await createClient();
   let userId: string | undefined;
   try {
-    const { data: claims } = await supabase.auth.getClaims();
-    userId = claims?.claims.sub as string | undefined;
+    const { data: claims, error } = await supabase.auth.getClaims();
+    if (error) {
+      console.error("[api/audits] getClaims returned an error", error.message);
+    } else {
+      userId = claims?.claims.sub as string | undefined;
+    }
   } catch (error) {
-    console.error("[api/audits] getClaims failed", error instanceof Error ? error.message : error);
+    console.error("[api/audits] getClaims threw", error instanceof Error ? error.message : error);
   }
   if (!userId) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
 
@@ -668,7 +700,10 @@ git commit -m "Handle 401/404/network errors in AuditPending polling and pay()"
 No code changes in this task — it exercises Tasks 1–8 together against a live server
 and confirms every requirement from the spec's testing plan.
 
-**Legacy fixture id (filled in by Task 1, Step 4):** `LEGACY_AUDIT_ID_PLACEHOLDER`
+**If any security check in this task fails: stop immediately. Do not clean up the
+failing evidence, do not proceed to the next step, and do not touch the branch. Document
+the exact cause and state (which check, what was expected, what actually happened) before
+making any fix.** No automatic merge of this branch, regardless of outcome.
 
 Authentication note for this whole task: this app's server-side Supabase client reads
 the session from the `sb-<project-ref>-auth-token` cookie via `@supabase/ssr` — there is
@@ -680,6 +715,15 @@ correctly), and uses `browser_evaluate` to run `fetch(...)` **from inside the pa
 any API-level (not just page-level) assertion — an in-page `fetch` automatically carries
 the browser's real cookies, same-origin, no manual cookie handling needed. Only the
 anonymous checks use plain `curl` (correctly cookie-less by construction).
+
+Secrets note: no access token is ever printed to a terminal/log or interpolated into a
+shell command in this task. The one file that holds them
+(`/tmp/access-control-fixtures.json`) is created with `600` permissions before anything
+is written to it, every script that needs a token reads the whole file from inside its
+own script body (never via `-e` string interpolation of the token itself — only fixed,
+non-secret file paths are ever interpolated), and the file is deleted in Step 15. Audit
+ids and user ids are **not** secret (established precedent this engagement) and may be
+printed/interpolated freely — only tokens and the shared test password are restricted.
 
 - [ ] **Step 1: Bring the dev server back up**
 
@@ -717,29 +761,43 @@ EOF
 docker compose run --rm -v /tmp/consistency-check.ts:/tmp/consistency-check.ts web npx tsx /tmp/consistency-check.ts
 ```
 
-Expected: four `OK` lines, exit code 0. This is the verification for the "completed
-audit with permanently missing report/metrics" requirement — done entirely in memory,
-no database row involved, so there's no need to fabricate an inconsistent row live.
+Expected: four `OK` lines, exit code 0.
 
-- [ ] **Step 3: Create and confirm two test users, and an owned audit fixture**
+- [ ] **Step 3: Create fixtures — two confirmed users, four separately-purposed audits**
 
-Two throwaway users (owner and a second, unrelated user), created via `generateLink`
-and then confirmed via `verifyOtp` — this project's established technique for creating a
-real, confirmed Supabase Auth user without a real inbox. `verifyOtp` also returns a live
-session, whose `access_token` is captured here **only** for Step 14's cleanup (`admin.signOut`
-requires an actual JWT, not a user id — there is no admin API to revoke sessions by user
-id alone). Actual test logins later in this task go through the real `/login` form in
-Playwright, not this captured token. One fully completed audit is created for the owner
-via the same `createAudit`/`saveScan`/`completeAudit` functions the real worker calls
-(not raw SQL), plus one unpaid audit for checkout testing:
+Four audits, each with one job, so no two assertions ever contradict each other on the
+same row:
+
+- `completedAuditId` — report render only, never touched by checkout.
+- `ownerCheckoutAuditId` — the one legitimate owner checkout (view pending state, check
+  the minimal `GET` shape, then actually pay).
+- `attackAuditId` — never has a successful checkout call made against it; used only for
+  the other-user and anonymous denial checks, and to confirm
+  `stripe_checkout_session_id` stays `null` both before and after those attempts.
+- `concurrencyAuditId` — a virgin audit whose *first ever* checkout call is the
+  simultaneous double-tab test in Step 9. Reusing an audit that already has a session
+  would only prove retrieval of an existing session, not the creation race.
+
+Two users, created via `generateLink` + `verifyOtp` (this project's established
+technique for a real, confirmed Supabase Auth user without a real inbox — `verifyOtp`
+also returns a live session, whose `access_token` is captured **only** for Step 14's
+cleanup; `admin.signOut` needs an actual JWT, there is no admin API to revoke sessions
+by user id alone). The full result, including both access tokens, is written to a
+`600`-permission file and never printed; only a sanitized subset (emails, user ids,
+audit ids) is printed to the terminal.
 
 ```bash
+touch /tmp/access-control-fixtures.json
+chmod 600 /tmp/access-control-fixtures.json
+
 cat > /tmp/setup-fixtures.ts <<'EOF'
+import { writeFileSync, chmodSync } from "node:fs";
 import { getSupabaseAdmin } from "/app/src/lib/db/client";
 import { createClient as createAnonClient } from "@supabase/supabase-js";
 import { createAudit, saveScan, completeAudit } from "/app/src/lib/db/audits";
 
 const PASSWORD = "Test-password-1!";
+const FIXTURE_FILE = "/tmp/access-control-fixtures.json";
 
 async function makeConfirmedUser(email: string) {
   const admin = getSupabaseAdmin();
@@ -748,7 +806,7 @@ async function makeConfirmedUser(email: string) {
   const anon = createAnonClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
   const { data: verified, error: verifyError } = await anon.auth.verifyOtp({ type: "signup", token_hash: data.properties.hashed_token });
   if (verifyError) throw verifyError;
-  return { userId: verified.user!.id, email, accessToken: verified.session!.access_token };
+  return { userId: verified.user!.id, email, password: PASSWORD, accessToken: verified.session!.access_token };
 }
 
 async function main() {
@@ -774,33 +832,59 @@ async function main() {
     priorities: [], sections: [], copySuggestions: [], quickWins: [], longTermImprovements: [],
   });
 
-  const unpaid = await createAudit("https://example.org", "https://example.org/", "get-leads", owner.userId);
+  const ownerCheckout = await createAudit("https://example.org", "https://example.org/", "get-leads", owner.userId);
+  const attack = await createAudit("https://example.net", "https://example.net/", "get-leads", owner.userId);
+  const concurrency = await createAudit("https://example.edu", "https://example.edu/", "get-leads", owner.userId);
 
-  console.log(JSON.stringify({ owner, other, completedAuditId: completed.id, unpaidAuditId: unpaid.id }, null, 2));
+  const fixture = {
+    owner, other,
+    completedAuditId: completed.id,
+    ownerCheckoutAuditId: ownerCheckout.id,
+    attackAuditId: attack.id,
+    concurrencyAuditId: concurrency.id,
+  };
+  writeFileSync(FIXTURE_FILE, JSON.stringify(fixture, null, 2), { mode: 0o600 });
+  chmodSync(FIXTURE_FILE, 0o600);
+
+  // Sanitized only — no tokens, no password.
+  console.log(JSON.stringify({
+    ownerUserId: owner.userId, ownerEmail: owner.email,
+    otherUserId: other.userId, otherEmail: other.email,
+    completedAuditId: completed.id, ownerCheckoutAuditId: ownerCheckout.id,
+    attackAuditId: attack.id, concurrencyAuditId: concurrency.id,
+  }, null, 2));
 }
 
 main();
 EOF
-docker compose run --rm -v /tmp/setup-fixtures.ts:/tmp/setup-fixtures.ts web npx tsx /tmp/setup-fixtures.ts
+docker compose run --rm -v /tmp/setup-fixtures.ts:/tmp/setup-fixtures.ts -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx /tmp/setup-fixtures.ts
 ```
 
-Record the full JSON output: `owner.userId`, `owner.email`, `owner.accessToken`,
-`other.userId`, `other.email`, `other.accessToken`, `completedAuditId`, `unpaidAuditId`.
-The password for both users is `Test-password-1!` (used to log in via the real
-`/login` form below).
+Record the sanitized ids printed to the terminal. The login password for both users is
+`Test-password-1!` — reused directly when filling the `/login` form below, but not
+otherwise printed or committed. Before moving on, confirm `attackAuditId`'s
+`stripe_checkout_session_id` is `null` right now (the "before" half of Step 5's
+before/after check):
+
+```bash
+docker compose run --rm web npx tsx -e "
+import { getSupabaseAdmin } from '/app/src/lib/db/client';
+getSupabaseAdmin().from('audits').select('stripe_checkout_session_id').eq('id', '<attackAuditId>').maybeSingle().then(({data}) => console.log(data));
+"
+```
 
 - [ ] **Step 4: Owner — page, status API, checkout (spec test 1)**
 
-Via Playwright: `browser_navigate` to `http://localhost:3100/login`, fill in
-`owner.email` / `Test-password-1!`, submit. Navigate to
+Via Playwright: `browser_navigate` to `http://localhost:3100/login`, fill in the
+owner's email / `Test-password-1!`, submit. Navigate to
 `http://localhost:3100/audits/{completedAuditId}` — confirm `ReportView` renders (a
 `browser_snapshot` shows the report content, not a redirect, not a 404). Navigate to
-`http://localhost:3100/audits/{unpaidAuditId}` — confirm the "Payment required" state
-renders. Then `browser_evaluate`, in the page:
+`http://localhost:3100/audits/{ownerCheckoutAuditId}` — confirm the "Payment required"
+state renders. Then `browser_evaluate`, in the page:
 
 ```js
 async () => {
-  const res = await fetch('/api/audits/{unpaidAuditId}', { cache: 'no-store' });
+  const res = await fetch('/api/audits/{ownerCheckoutAuditId}', { cache: 'no-store' });
   return { status: res.status, body: await res.json() };
 }
 ```
@@ -809,90 +893,124 @@ Confirm `status: 200` and the body is exactly `{id, status, paid, errorMessage}`
 `url`, `page`, `metrics`, `report`, `userId`, `stripeCheckoutSessionId`, or any other
 field. Click "Complete payment" (or run the equivalent `fetch('/api/checkout', {method:
 'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({auditId:
-'{unpaidAuditId}'})})` via `browser_evaluate`) — confirm a Stripe Checkout URL is
-returned and it resolves to a real Stripe Test Mode checkout page.
+'{ownerCheckoutAuditId}'})})` via `browser_evaluate`) — confirm a Stripe Checkout URL is
+returned and it resolves to a real Stripe Test Mode checkout page. This is the only
+audit this task ever successfully checks out as the owner — do not reuse
+`ownerCheckoutAuditId` for anything else below.
 
-- [ ] **Step 5: Second authenticated user (spec test 2)**
+- [ ] **Step 5: Second authenticated user — attack on `attackAuditId` (spec test 2)**
 
-Via Playwright (a fresh browser context, or logged out then back in): log in as
-`other.email` / `Test-password-1!` via the real `/login` form. Navigate to
-`http://localhost:3100/audits/{unpaidAuditId}` (the owner's audit) — confirm the Next.js
-not-found page renders. Via `browser_evaluate`:
+Via Playwright (a fresh browser context, or logged out then back in): log in as the
+other user / `Test-password-1!` via the real `/login` form. Navigate to
+`http://localhost:3100/audits/{attackAuditId}` (the owner's audit, not theirs) — confirm
+the Next.js not-found page renders. Via `browser_evaluate`:
 
 ```js
 async () => {
-  const status = await fetch('/api/audits/{unpaidAuditId}', { cache: 'no-store' }).then(r => r.status);
-  const checkoutStatus = await fetch('/api/checkout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auditId: '{unpaidAuditId}' }) }).then(r => r.status);
+  const status = await fetch('/api/audits/{attackAuditId}', { cache: 'no-store' }).then(r => r.status);
+  const checkoutStatus = await fetch('/api/checkout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auditId: '{attackAuditId}' }) }).then(r => r.status);
   return { status, checkoutStatus };
 }
 ```
 
-Confirm both are `404`. Then confirm no session was written:
+Confirm both are `404`. Then confirm no session was written — this is the "after" half
+of the before/after check started at the end of Step 3:
 
 ```bash
 docker compose run --rm web npx tsx -e "
 import { getSupabaseAdmin } from '/app/src/lib/db/client';
-getSupabaseAdmin().from('audits').select('stripe_checkout_session_id').eq('id', '{unpaidAuditId}').maybeSingle().then(({data}) => console.log(data));
+getSupabaseAdmin().from('audits').select('stripe_checkout_session_id').eq('id', '<attackAuditId>').maybeSingle().then(({data}) => console.log(data));
 "
 ```
 
-Confirm `stripe_checkout_session_id` is still `null`.
+Confirm `stripe_checkout_session_id` is still `null` — unchanged from Step 3's "before" read.
 
 - [ ] **Step 6: Anonymous (spec test 3)**
 
-Plain `curl`, no cookies:
+Plain `curl`, no cookies, also against `attackAuditId` (it must stay untouched by every
+angle of attack, not just the second user):
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/audits/{unpaidAuditId}
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/audits/{attackAuditId}
 ```
 
 Expected: a redirect response (`307`/`308` to `/login`) or, if following redirects,
 confirm the final URL is `/login` (`curl -s -o /dev/null -w "%{redirect_url}\n"`).
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/api/audits/{unpaidAuditId}
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3100/api/checkout -H "content-type: application/json" -d "{\"auditId\":\"{unpaidAuditId}\"}"
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/api/audits/{attackAuditId}
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3100/api/checkout -H "content-type: application/json" -d "{\"auditId\":\"{attackAuditId}\"}"
 curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3100/api/audits -H "content-type: application/json" -d '{"url":"https://a-made-up-test-host.invalid","pageGoal":"get-leads"}'
 ```
 
 Expected: `401`, `401`, `401`. For the last one, also confirm no DNS/SSRF validation was
 attempted: `docker compose logs web --since 1m | grep -i "made-up-test-host"` should
 return nothing, since the route now returns 401 before ever calling `assertSafeUrl`.
+Re-confirm `attackAuditId`'s `stripe_checkout_session_id` is still `null` after this
+step too (same read as Step 5).
 
 - [ ] **Step 7: Legacy `user_id = null` audit (spec test 4)**
 
-Anonymous: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/api/audits/LEGACY_AUDIT_ID_PLACEHOLDER` → expect `401`.
+Read the id captured in Task 1 (never write it into this plan or a commit):
+
+```bash
+LEGACY_ID=$(cat /tmp/access-control-legacy-audit-id.txt)
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/api/audits/$LEGACY_ID
+```
+
+Expected: `401` (anonymous).
 
 Authenticated (reuse the owner's Playwright session from Step 4, or log in again):
-navigate to `http://localhost:3100/audits/LEGACY_AUDIT_ID_PLACEHOLDER` — confirm 404,
-never the report. Via `browser_evaluate`, `fetch('/api/audits/LEGACY_AUDIT_ID_PLACEHOLDER')` → confirm `404`.
+navigate to `http://localhost:3100/audits/$LEGACY_ID` — confirm 404, never the report.
+Via `browser_evaluate`, `fetch('/api/audits/$LEGACY_ID')` → confirm `404`.
 
 - [ ] **Step 8: `/audits/demo` (spec test 5)**
 
 Plain `curl`, no cookies: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3100/audits/demo` → expect `200`. Via Playwright, navigate there and confirm the full demo report renders, unaffected.
 
-- [ ] **Step 9: Owner, two tabs (spec test 6)**
+- [ ] **Step 9: Owner, two tabs — first-ever checkout call on `concurrencyAuditId` (spec test 6)**
 
-As the owner (Step 4's session, or a fresh login), open a second tab in the same
-browser context (`browser_tabs`) on `http://localhost:3100/audits/{unpaidAuditId}` — if
-Step 4 already paid this one, create a fresh unpaid audit for the owner first via the
-Step 3 setup script's `createAudit` call (same pattern, new URL). In both tabs, within a
-few seconds of each other, run the checkout `fetch` from Step 4 via `browser_evaluate`.
-Confirm both calls return the same Stripe Checkout URL/session id, and re-run the
-`stripe_checkout_session_id` read from Step 5 (pointed at this audit) to confirm only
-one value was ever written — no second payable session.
+This audit has never had a checkout call made against it — confirm that first, so the
+race being tested is genuinely session *creation*, not retrieval of something already
+there:
+
+```bash
+docker compose run --rm web npx tsx -e "
+import { getSupabaseAdmin } from '/app/src/lib/db/client';
+getSupabaseAdmin().from('audits').select('stripe_checkout_session_id').eq('id', '<concurrencyAuditId>').maybeSingle().then(({data}) => console.log(data));
+"
+```
+
+Confirm `stripe_checkout_session_id` is `null`. As the owner (Step 4's session, or a
+fresh login), open a second tab in the same browser context (`browser_tabs`) on
+`http://localhost:3100/audits/{concurrencyAuditId}`. In both tabs, within a few seconds
+of each other, run the checkout `fetch` from Step 4 (pointed at `concurrencyAuditId`)
+via `browser_evaluate`. Confirm both calls return the same Stripe Checkout URL/session
+id, then re-run the read above once more: confirm exactly one non-null
+`stripe_checkout_session_id` was written, not two different values.
 
 - [ ] **Step 10: Session expires mid-poll (spec test 7)**
 
-As the owner, log in via `/login`, then navigate to a `pending`/`running` audit —
-create a fresh one via the Step 3 setup script's `createAudit` call (owner id, no
-`saveScan`/`completeAudit`, so it stays `"pending"`). While `AuditPending` is actively
-polling, clear cookies via `page.context().clearCookies()`. Within one polling interval
-(~3s), confirm: the browser navigates to `/login`. Then attempt `page.goBack()` and
-confirm it does **not** return to the audit page (proving `router.replace` was used, not
-`push`) — Back should either stay on `/login` or go further back in history, never to
-`/audits/{id}`. Confirm the audit was never shown in a `"failed"` state during this
-sequence.
+As the owner, log in via `/login`, then navigate to a fresh, dedicated `pending` audit
+(not one of the four named fixtures — created ad hoc for this step only):
+
+```bash
+docker compose run --rm web npx tsx -e "
+import { readFileSync } from 'node:fs';
+import { createAudit } from '/app/src/lib/db/audits';
+const fixture = JSON.parse(readFileSync('/tmp/access-control-fixtures.json', 'utf8'));
+createAudit('https://example.co', 'https://example.co/', 'get-leads', fixture.owner.userId).then((a) => console.log(a.id));
+" 2>&1 | tail -1
+```
+
+(mount `/tmp/access-control-fixtures.json` the same way as Step 3's run). Record this id
+as `pendingAuditId`. Navigate to `/audits/{pendingAuditId}` — `AuditPending` should be
+actively polling. Clear cookies via `page.context().clearCookies()`. Within one polling
+interval (~3s), confirm: the browser navigates to `/login`. Then attempt
+`page.goBack()` and confirm it does **not** return to the audit page (proving
+`router.replace` was used, not `push`) — Back should either stay on `/login` or go
+further back in history, never to `/audits/{pendingAuditId}`. Confirm the audit was
+never shown in a `"failed"` state during this sequence.
 
 - [ ] **Step 11: `typecheck`/`lint`/`build` (spec test 10)**
 
@@ -913,76 +1031,142 @@ async () => {
 }
 ```
 
-Confirm `status: 202`, record the returned `id`, then confirm its `user_id` matches the owner:
+Confirm `status: 202`, record the returned `id` as `postCreatedAuditId`, then confirm
+its `user_id` matches the owner:
 
 ```bash
 docker compose run --rm web npx tsx -e "
 import { getSupabaseAdmin } from '/app/src/lib/db/client';
-getSupabaseAdmin().from('audits').select('user_id').eq('id', '<new id>').maybeSingle().then(({data}) => console.log(data));
+getSupabaseAdmin().from('audits').select('user_id').eq('id', '<postCreatedAuditId>').maybeSingle().then(({data}) => console.log(data));
 "
 ```
 
 - [ ] **Step 13: List every test id created this task**
 
-Before cleanup, write down: `owner.userId`, `other.userId`, and every audit id created
-in Steps 3, 9, 10, 12 (completed, unpaid, the Step 9 fresh unpaid one if created, the
-Step 10 fresh pending one, the Step 12 POST-created one), plus
-`LEGACY_AUDIT_ID_PLACEHOLDER` from Task 1. Confirm this list against what actually got
-created before deleting anything.
+Before cleanup, write down: owner and other user ids (from Step 3's sanitized output),
+`completedAuditId`, `ownerCheckoutAuditId`, `attackAuditId`, `concurrencyAuditId`,
+`pendingAuditId` (Step 10), `postCreatedAuditId` (Step 12), and the legacy id from
+`/tmp/access-control-legacy-audit-id.txt` (Task 1). Confirm this list against what
+actually got created before deleting anything.
 
-- [ ] **Step 14: Clean up — sessions, users, audits**
+- [ ] **Step 14: Clean up, in this exact order**
 
-Revoke each test user's session before deleting the user record, using the
-`access_token` captured in Step 3 — deleting the user alone does not guarantee an
-already-issued JWT is invalidated immediately, since Supabase access tokens are
-self-contained and valid until they expire regardless of whether the user record still
-exists. `admin.signOut` requires the token itself (there is no admin API to revoke by
-user id alone):
+Order matters: audits are deleted **before** users. The `user_id` foreign key is `on
+delete set null` — deleting a user first would turn their still-undeleted audits into
+`user_id = null` rows, and any failure partway through cleanup would leave freshly
+created legacy rows behind, which is exactly what this sprint exists to prevent.
+
+**14a. Revoke sessions globally**, reading tokens from the fixture file — never via
+shell interpolation:
 
 ```bash
-docker compose run --rm web npx tsx -e "
-import { getSupabaseAdmin } from '/app/src/lib/db/client';
+cat > /tmp/revoke-sessions.ts <<'EOF'
+import { readFileSync } from "node:fs";
+import { getSupabaseAdmin } from "/app/src/lib/db/client";
+
+const fixture = JSON.parse(readFileSync("/tmp/access-control-fixtures.json", "utf8"));
 const admin = getSupabaseAdmin();
-async function cleanupUser(userId: string, accessToken: string) {
-  try { await admin.auth.admin.signOut(accessToken, 'global'); } catch (e) { console.error('signOut failed (deleting anyway)', userId, e); }
-  await admin.auth.admin.deleteUser(userId);
+
+async function revoke(label: string, accessToken: string) {
+  try {
+    await admin.auth.admin.signOut(accessToken, "global");
+    console.log(`revoked: ${label}`);
+  } catch (e) {
+    console.error(`signOut failed for ${label} (deleting the user anyway)`, e instanceof Error ? e.message : e);
+  }
 }
+
 Promise.all([
-  cleanupUser('<owner.userId>', '<owner.accessToken>'),
-  cleanupUser('<other.userId>', '<other.accessToken>'),
-]).then(() => console.log('users cleaned'));
-"
+  revoke("owner", fixture.owner.accessToken),
+  revoke("other", fixture.other.accessToken),
+]).then(() => console.log("sessions revoked"));
+EOF
+docker compose run --rm -v /tmp/revoke-sessions.ts:/tmp/revoke-sessions.ts -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx /tmp/revoke-sessions.ts
 ```
 
-Then delete every test audit row by id (parameterized deletes via the admin client —
-tidying up rows created through tested application functions, not raw SQL, not
-fabricating test conditions):
+**14b. Delete every test audit row by id:**
 
 ```bash
-docker compose run --rm web npx tsx -e "
+LEGACY_ID=$(cat /tmp/access-control-legacy-audit-id.txt)
+docker compose run --rm -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx -e "
+import { readFileSync } from 'node:fs';
 import { getSupabaseAdmin } from '/app/src/lib/db/client';
-const ids = ['<completedAuditId>', '<unpaidAuditId>', '<any Step 9/10/12 ids>', 'LEGACY_AUDIT_ID_PLACEHOLDER'];
-getSupabaseAdmin().from('audits').delete().in('id', ids).then(({error}) => { if (error) throw error; console.log('audits cleaned'); });
+const fixture = JSON.parse(readFileSync('/tmp/access-control-fixtures.json', 'utf8'));
+const ids = [fixture.completedAuditId, fixture.ownerCheckoutAuditId, fixture.attackAuditId, fixture.concurrencyAuditId, '<pendingAuditId>', '<postCreatedAuditId>', '$LEGACY_ID'];
+getSupabaseAdmin().from('audits').delete().in('id', ids).then(({error}) => { if (error) throw error; console.log('audits deleted:', ids); });
 "
 ```
 
-Declare here, in the commit message for this step, every Stripe Test Mode session id
-that was created during Steps 4 and 9 (there should be at most two distinct ids, since
-Step 9's double-tab test is specifically checking that no second one was created).
+**14c. Confirm none remain:**
+
+```bash
+docker compose run --rm -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx -e "
+import { readFileSync } from 'node:fs';
+import { getSupabaseAdmin } from '/app/src/lib/db/client';
+const fixture = JSON.parse(readFileSync('/tmp/access-control-fixtures.json', 'utf8'));
+const ids = [fixture.completedAuditId, fixture.ownerCheckoutAuditId, fixture.attackAuditId, fixture.concurrencyAuditId, '<pendingAuditId>', '<postCreatedAuditId>', '$LEGACY_ID'];
+getSupabaseAdmin().from('audits').select('id').in('id', ids).then(({data}) => console.log('remaining rows:', data));
+"
+```
+
+Expected: `remaining rows: []`. If not empty, **stop** — do not proceed to delete users
+while any test audit row still exists.
+
+**14d. Delete test users:**
+
+```bash
+docker compose run --rm -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx -e "
+import { readFileSync } from 'node:fs';
+import { getSupabaseAdmin } from '/app/src/lib/db/client';
+const fixture = JSON.parse(readFileSync('/tmp/access-control-fixtures.json', 'utf8'));
+const admin = getSupabaseAdmin();
+Promise.all([admin.auth.admin.deleteUser(fixture.owner.userId), admin.auth.admin.deleteUser(fixture.other.userId)]).then(() => console.log('users deleted'));
+"
+```
+
+**14e. Confirm no orphaned rows or users remain:**
+
+```bash
+docker compose run --rm -v /tmp/access-control-fixtures.json:/tmp/access-control-fixtures.json web npx tsx -e "
+import { readFileSync } from 'node:fs';
+import { getSupabaseAdmin } from '/app/src/lib/db/client';
+const fixture = JSON.parse(readFileSync('/tmp/access-control-fixtures.json', 'utf8'));
+const admin = getSupabaseAdmin();
+Promise.all([
+  admin.from('audits').select('id').eq('user_id', fixture.owner.userId),
+  admin.from('audits').select('id').eq('user_id', fixture.other.userId),
+  admin.auth.admin.getUserById(fixture.owner.userId),
+  admin.auth.admin.getUserById(fixture.other.userId),
+]).then(([ownerAudits, otherAudits, ownerUser, otherUser]) => console.log({
+  orphanedOwnerAudits: ownerAudits.data,
+  orphanedOtherAudits: otherAudits.data,
+  ownerUserStillExists: !ownerUser.error,
+  otherUserStillExists: !otherUser.error,
+}));
+"
+```
+
+Expected: both audit arrays empty, both `*StillExists` flags `false`.
+
+Declare here, in the report (Step 16), every Stripe Test Mode session id created during
+Steps 4 and 9 (there should be exactly two distinct ids, since Step 9's double-tab test
+is specifically checking that no second one was created for `concurrencyAuditId`).
+Stripe test sessions expire on their own and need no separate deletion.
 
 - [ ] **Step 15: Tear down**
 
 ```bash
 docker compose down
-rm -f docker-compose.override.yml /tmp/consistency-check.ts /tmp/setup-fixtures.ts
+rm -f docker-compose.override.yml /tmp/consistency-check.ts /tmp/setup-fixtures.ts /tmp/revoke-sessions.ts /tmp/access-control-fixtures.json /tmp/access-control-legacy-audit-id.txt
 git status --short
 ```
 
-Expected: clean working tree (only the Task 1 plan-file edit and Tasks 2–8's code
-commits present in history; nothing uncommitted, `docker-compose.override.yml` gone).
+Expected: clean working tree (only Tasks 2–8's code commits present in history; nothing
+uncommitted, `docker-compose.override.yml` gone, both temp fixture files gone).
 
 - [ ] **Step 16: Report results**
 
-Summarize pass/fail for every step above, the Stripe Test Mode session ids created and
-confirmed as cleaned up (Stripe test sessions expire on their own and don't need
-separate deletion), and confirm final `git log` / `git status`.
+Summarize pass/fail for every step above, the two Stripe Test Mode session ids created
+(from Steps 4 and 9), confirmation that cleanup steps 14a–14e all completed
+successfully and in order, and confirm final `git log` / `git status`. Do not open a PR
+or merge — report and stop for review.
