@@ -33,7 +33,21 @@
 - [ ] Add structured logging and error monitoring.
 - [ ] Add abuse budget, domain/audit quotas and retention cleanup.
 - [ ] Test the complete worker against a representative URL corpus.
-- [ ] Add billing only after free-to-paid report boundaries are validated.
+- [x] Stripe Checkout is implemented for paid audits and tested end-to-end in Stripe Test Mode (explicit "Complete payment" click only, no implicit session creation on audit creation). Switching to Stripe Live is tracked under Launch blockers below.
+
+## Launch blockers — before accepting real payments
+
+- [ ] Define the operator's legal identity, registered address, VAT/registration number and applicable governing law.
+- [ ] Complete final legal review and remove every "draft"/placeholder banner from the legal pages.
+- [ ] Define retention periods for audits, reports, screenshots, logs and payment metadata.
+- [ ] Verify DPAs, hosting regions and international-transfer safeguards for every active provider.
+- [ ] Implement non-preselected EU pre-checkout consent, recording user_id, audit_id, consent text version and timestamp.
+- [ ] Protect /api/checkout by verifying the audit belongs to the authenticated user.
+- [ ] Protect /audits/[id]: today anyone who knows the UUID can read a completed report — add server-side ownership checks and keep only /audits/demo public.
+- [ ] Set up real handling of privacy/GA4 data-subject requests.
+- [ ] Configure the $9.99 founder price, consistent UI copy, and switch Stripe to Live mode.
+- [ ] Make the production worker operational and monitored.
+- [ ] Complete rate limiting, anti-abuse quotas, retry/heartbeat recovery and private screenshot storage.
 
 ## Product evolution — AI Website Engineer
 

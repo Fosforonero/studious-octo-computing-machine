@@ -55,6 +55,6 @@ export function FullLandingPage() {
 
       <section className="px-5 pb-5 md:px-10"><div className="hero-glow grid-noise mx-auto max-w-[1400px] rounded-[2rem] px-6 py-20 text-center text-white md:px-12 md:py-28"><Bot className="pulse-ring mx-auto size-12 rounded-full bg-primary p-3 text-foreground" /><h2 className="display mx-auto mt-8 max-w-4xl text-[clamp(4rem,8vw,8rem)]">Your website is already talking. Let&apos;s listen.</h2><div className="mt-10"><AuditForm /></div></div></section>
     </main>
-    <footer className="px-5 py-10 md:px-10"><div className="mx-auto flex max-w-[1400px] flex-col justify-between gap-5 border-t pt-8 text-xs text-muted-foreground sm:flex-row"><span>© 2026 Lensiq. Your website, seen clearly.</span><div className="flex gap-6"><Link href="/audits/demo">Sample report</Link><Link href="/privacy">Privacy</Link><Link href="mailto:hello@lensiq.site">Contact <ChevronRight className="inline size-3" /></Link></div></div></footer>
+    <footer className="px-5 py-10 md:px-10"><div className="mx-auto flex max-w-[1400px] flex-col justify-between gap-5 border-t pt-8 text-xs text-muted-foreground sm:flex-row"><span>© 2026 Lensiq. Your website, seen clearly.</span><div className="flex gap-6"><Link href="/audits/demo">Sample report</Link><Link href="/privacy">Privacy</Link><Link href="/terms">Terms</Link><Link href="/cookies">Cookies</Link><Link href="/legal-notice">Legal Notice</Link><Link href="mailto:hello@lensiq.site">Contact <ChevronRight className="inline size-3" /></Link></div></div></footer>
   </>;
 }

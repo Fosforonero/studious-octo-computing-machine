@@ -20,7 +20,7 @@ export default function TermsPage() {
         <span className="eyebrow">Terms</span>
         <h1 className="display mt-8 text-7xl">The plain-language version.</h1>
         <p className="mt-6 text-xs font-bold uppercase tracking-wide text-amber-700">
-          Draft for MVP validation, last updated 2026-07-08. Not yet reviewed by legal counsel — in particular the
+          Draft for MVP validation, last updated 2026-07-10. Not yet reviewed by legal counsel — in particular the
           governing law, liability and payment sections need a lawyer&apos;s input before Lensiq accepts payments or
           onboards customers outside a beta/testing capacity.
         </p>
@@ -60,8 +60,21 @@ export default function TermsPage() {
           <section>
             <h2 className="text-lg font-bold text-foreground">Payments</h2>
             <p className="mt-2">
-              Lensiq is currently in a free beta period. If and when paid plans are introduced, this section will be
-              updated with pricing, billing cycle, renewal, and refund terms before any card is charged.
+              Some audits require payment before Lensiq starts processing them. Payments are handled by Stripe;
+              Lensiq never receives or stores your full card details. The price is shown to you at checkout before
+              you pay.
+            </p>
+            <p className="mt-2">
+              Because each audit is generated specifically for the website submitted by the customer, payments are
+              generally non-refundable once processing has started, except where required by applicable law or
+              where Lensiq fails to deliver the purchased service. This does not affect the customer&apos;s
+              statutory rights.
+            </p>
+            <p className="mt-2">
+              EU consumers may request that Lensiq begin performing the audit immediately. Where required by
+              applicable law, we will obtain your express consent before payment and inform you when the right of
+              withdrawal may be lost following performance of the service. This does not affect any mandatory
+              statutory rights.
             </p>
           </section>
 

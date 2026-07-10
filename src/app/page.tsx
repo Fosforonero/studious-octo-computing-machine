@@ -118,6 +118,7 @@ export default function ComingSoonPage() {
             <Link href="/privacy" className="hover:text-white/70">Privacy</Link>
             <Link href="/cookies" className="hover:text-white/70">Cookies</Link>
             <Link href="/terms" className="hover:text-white/70">Terms</Link>
+            <Link href="/legal-notice" className="hover:text-white/70">Legal Notice</Link>
           </div>
         </footer>
       </div>
