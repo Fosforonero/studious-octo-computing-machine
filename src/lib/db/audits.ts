@@ -36,6 +36,46 @@ export async function getAudit(id: string): Promise<AuditRecord | null> {
   return result;
 }
 
+// Single-table, id + user_id scoped — no join. Backs resolveAuditAccess, so this is what
+// the polling endpoint and the checkout endpoint run on every call. A user_id column is
+// never null for an authenticated caller, and SQL `null = 'x'` is never true, so legacy
+// user_id-is-null rows never match here.
+export async function getOwnedAuditSummary(id: string, userId: string): Promise<AuditRecord | null> {
+  const { data, error } = await getSupabaseAdmin().from("audits").select("*").eq("id", id).eq("user_id", userId).maybeSingle();
+  if (error) throw error;
+  return data ? mapAudit(data) : null;
+}
+
+// Same id + user_id scoping on the base row; only joins audit_pages/audit_metrics/audit_reports
+// once that scoped row is confirmed to exist. Used exactly once per report-page render, only
+// when status is already "completed" — never during polling.
+export async function getOwnedAuditFull(id: string, userId: string): Promise<AuditRecord | null> {
+  const db = getSupabaseAdmin();
+  const { data: row, error } = await db.from("audits").select("*").eq("id", id).eq("user_id", userId).maybeSingle();
+  if (error) throw error;
+  if (!row) return null;
+  const [pageResult, metricsResult, reportResult] = await Promise.all([
+    db.from("audit_pages").select("*").eq("audit_id", id).maybeSingle(),
+    db.from("audit_metrics").select("*").eq("audit_id", id).maybeSingle(),
+    db.from("audit_reports").select("*").eq("audit_id", id).maybeSingle(),
+  ]);
+  // Each of the three carries its own { data, error } — a failed child query is a real
+  // infrastructure error, not "this audit has no report yet," so it must propagate
+  // (throw) rather than silently read as missing data. Only a clean data: null with no
+  // error on all three is allowed to mean "not present."
+  if (pageResult.error) throw pageResult.error;
+  if (metricsResult.error) throw metricsResult.error;
+  if (reportResult.error) throw reportResult.error;
+  const { data: page } = pageResult;
+  const { data: metrics } = metricsResult;
+  const { data: report } = reportResult;
+  const result = mapAudit(row);
+  if (page) result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
+  if (metrics) result.metrics = { performanceScore: metrics.performance_score, accessibilityScore: metrics.accessibility_score, seoScore: metrics.seo_score, bestPracticesScore: metrics.best_practices_score, lcp: metrics.lcp, cls: metrics.cls, inpOrTbt: metrics.inp_or_tbt, ttfb: metrics.ttfb, imageIssues: metrics.image_issues ?? [], renderBlockingResources: metrics.render_blocking_resources ?? 0, scriptWeightBytes: metrics.script_weight_bytes ?? 0 };
+  if (report) result.report = report.report_json as FinalReport;
+  return result;
+}
+
 export async function claimNextAudit() {
   const { data, error } = await getSupabaseAdmin().rpc("claim_next_audit");
   if (error) throw error;

@@ -7,6 +7,20 @@ import { createClient } from "@/lib/supabase/server";
 const requestSchema = z.object({ url: z.string().trim().min(3).max(2048), pageGoal: z.enum(["get-leads", "book-demos", "sell", "signups", "inform"]) });
 
 export async function POST(request: Request) {
+  const supabase = await createClient();
+  let userId: string | undefined;
+  try {
+    const { data: claims, error } = await supabase.auth.getClaims();
+    if (error) {
+      console.error("[api/audits] getClaims returned an error", error.message);
+    } else {
+      userId = claims?.claims.sub as string | undefined;
+    }
+  } catch (error) {
+    console.error("[api/audits] getClaims threw", error instanceof Error ? error.message : error);
+  }
+  if (!userId) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
+
   let body: z.infer<typeof requestSchema>;
   try {
     body = requestSchema.parse(await request.json());
@@ -20,10 +34,6 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Enter a valid website URL." }, { status: 400 });
   }
-
-  const supabase = await createClient();
-  const { data: claims } = await supabase.auth.getClaims();
-  const userId = (claims?.claims.sub as string | undefined) ?? null;
 
   try {
     const audit = await createAudit(body.url, normalizedUrl, body.pageGoal, userId);
