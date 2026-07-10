@@ -3,13 +3,10 @@
 import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { GoogleAnalytics } from "@/components/analytics/google-analytics";
-
-type Consent = "granted" | "denied" | "unset";
-
-const STORAGE_KEY = "lensiq-consent";
+import { CONSENT_STORAGE_KEY, type Consent } from "@/lib/analytics/consent";
 
 function getSnapshot(): Consent {
-  const value = window.localStorage.getItem(STORAGE_KEY);
+  const value = window.localStorage.getItem(CONSENT_STORAGE_KEY);
   return value === "granted" || value === "denied" ? value : "unset";
 }
 
@@ -28,7 +25,7 @@ export function CookieConsent({ measurementId }: { measurementId?: string }) {
   const consent = override ?? stored;
 
   function decide(value: Exclude<Consent, "unset">) {
-    window.localStorage.setItem(STORAGE_KEY, value);
+    window.localStorage.setItem(CONSENT_STORAGE_KEY, value);
     setOverride(value);
   }
 
@@ -43,8 +40,8 @@ export function CookieConsent({ measurementId }: { measurementId?: string }) {
               <Link href="/cookies" className="font-bold text-white underline underline-offset-2">Cookie Policy</Link>{" "}for details.
             </p>
             <div className="flex shrink-0 gap-3">
-              <button type="button" onClick={() => decide("denied")} className="rounded-full border border-white/20 px-5 py-2.5 text-xs font-bold text-white/80 transition hover:bg-white/5">Reject</button>
-              <button type="button" onClick={() => decide("granted")} className="rounded-full bg-white px-5 py-2.5 text-xs font-bold text-[#0b1220] transition hover:bg-white/90">Accept</button>
+              <button type="button" onClick={() => decide("denied")} className="rounded-full border border-white/70 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-white/10">Reject</button>
+              <button type="button" onClick={() => decide("granted")} className="rounded-full border border-white/70 px-5 py-2.5 text-xs font-bold text-white transition hover:bg-white/10">Accept</button>
             </div>
           </div>
         </div>
