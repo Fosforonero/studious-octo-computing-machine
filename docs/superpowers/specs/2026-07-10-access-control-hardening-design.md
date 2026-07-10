@@ -56,13 +56,21 @@ column is never `null` for an authenticated caller, and SQL `null = 'x'` is neve
 so legacy `user_id is null` rows are excluded by the query itself, with no special-case
 branch required.
 
-**`not-found` means a clean "no matching row," not a failure.** `resolveAuditAccess`
-does not catch exceptions from `getOwnedAuditSummary` (a genuine DB error is not the
-same thing as "you don't own this") — those propagate to the caller, which keeps its
-own existing error-handling convention: the page's existing `try { … } catch { notFound(); }`
-around its audit fetch, and the API routes' existing `catch { … return 500 }`. Folding a
-real infrastructure failure into a fake `not-found` would make outages indistinguishable
-from correct denials in the logs, which defeats the point of a clean 401/404 split.
+**`not-found` means a clean "no matching row," not a failure — a DB error must never
+become `notFound()`.** `resolveAuditAccess` does not catch exceptions from
+`getOwnedAuditSummary` (a genuine DB error is not the same thing as "you don't own
+this"). The page handler follows exactly two paths: the query completes and finds no
+row (or `resolveAuditAccess` cleanly returns `not-found`/`unauthenticated`) →
+`notFound()` / `redirect("/login")`, the normal, expected outcomes. A thrown
+Supabase/database exception → log it (audit id and error message/code only, no
+cookies, tokens, or raw request data — "sanitized" here means exactly that) and
+**rethrow**, so Next.js's own error handling takes over and the response is a real
+error boundary/500, not a 404. The API routes already do this correctly today
+(`catch { … return 500 }`) and are unchanged. Folding a real infrastructure failure into
+a fake `not-found` would make outages indistinguishable from correct denials in the
+logs, which defeats the point of a clean 401/404 split. This sprint does not add a
+custom `error.tsx` — an uncaught throw from the page falls through to Next.js's default
+error boundary, which is out of scope to restyle here.
 
 ## Database layer — two query tiers
 
@@ -108,11 +116,21 @@ Called exactly once per page render, and only when the audit's status is already
    (`id`, `status`, `paid`, `errorMessage`) — no full-load query needed.
 7. `ok`, status `=== "completed"` → `full = await getOwnedAuditFull(id, access.userId)`.
    If `full` and `full.report` and `full.metrics` are all present → `<ReportView audit={full} />`.
-   Otherwise (the same rare atomicity edge case the current code already guards against)
-   → fall back to `AuditPending` with a `"running"` status, exactly like today's
-   `audit.status !== "completed" || !audit.report || !audit.metrics` guard. A thrown
-   error from this call keeps today's page-level convention (`catch { notFound(); }`)
-   rather than surfacing a generic 500.
+   A thrown error from this call is **not** caught into `notFound()` — same rule as
+   above: log and rethrow, let it surface as a real error boundary/500.
+
+   If the query succeeds but `full.report` or `full.metrics` is still missing while
+   `status` is `"completed"`, this is **not** treated as "still processing" and must
+   **not** render `AuditPending`. Today's code falls back to the pending UI here, but
+   that's a trap: `GET /api/audits/{id}` reports `status: "completed"` regardless of
+   whether the join data landed, and `AuditPending`'s own polling loop does
+   `if (status === "completed") router.refresh()` — so rendering `AuditPending` in this
+   state produces an immediate refresh, which re-runs this same check, which renders
+   `AuditPending` again: an infinite completed → refresh loop, not a transient wait.
+   Instead, this is a server-side data inconsistency (status flipped without its
+   report/metrics, which the atomic `complete_audit` RPC should prevent but this handler
+   must not assume): log the audit id and throw, surfacing the same error boundary/500
+   as any other infrastructure failure above, never a polling state.
 
 ### `GET /api/audits/[id]`
 
@@ -164,11 +182,22 @@ change and the pending-claim flow.
 
 The polling `setInterval` callback currently does `if (!response.ok) return;` — silently
 ignoring 401, 404, and 5xx alike, which would otherwise poll forever against a
-now-guarded endpoint. New behavior, checked in this order after each poll:
+now-guarded endpoint. The whole body of the interval callback (the `fetch` call and the
+subsequent `.json()` parse) is wrapped in `try/catch`: an `async` function passed to
+`setInterval` returns a promise nothing awaits, so a rejected `fetch` (offline, DNS
+failure, any network-level error) becomes an **unhandled promise rejection**, not a
+value silently discarded — leaving it unwrapped was a real bug in the original spec
+text, not a difference that doesn't matter. On a caught network error: no state change,
+just return — the next tick retries naturally, same posture as a transient 5xx.
 
-- **`response.status === 401`** — clear the interval, redirect to `/login`
-  (`router.push("/login")`). Covers a session that expires while the tab is sitting on
-  this page; the timer is cleared before navigating so no further tick can fire.
+For a successful response, checked in this order:
+
+- **`response.status === 401`** — clear the interval, redirect to `/login` with
+  `router.replace("/login")`, **not** `router.push`. `replace` is required, not
+  cosmetic: `push` leaves the audit page in browser history, so pressing Back from
+  `/login` would land straight back on a page whose next poll immediately 401s again.
+  Covers a session that expires while the tab is sitting on this page; the timer is
+  cleared before navigating so no further tick can fire.
 - **`response.status === 404`** — clear the interval, switch to a new local state
   (`"unavailable"`) rendered as a new branch alongside the existing `"failed"` branch:
   eyebrow "Audit unavailable", heading "We can't find this audit.", body "It may have
@@ -177,14 +206,11 @@ now-guarded endpoint. New behavior, checked in this order after each poll:
 - **Any other non-`ok` status** (5xx, or anything else transient) — no state change,
   same as today: skip this tick, let the next interval retry. The audit is not marked
   failed.
-- A `fetch` that rejects outright (network error) already behaves this way today by
-  construction — the `await` throws, nothing after it runs, and the interval simply
-  fires again on the next tick. No new handling needed for that case.
 
 `pay()`'s existing fetch to `/api/checkout` gets one new branch: if the response status
-is `401`, redirect to `/login` instead of setting the generic `payError` message
-(covers a session that expired while the "Complete payment" prompt was showing). Any
-other non-ok response (404, 5xx) keeps today's generic inline error behavior.
+is `401`, `router.replace("/login")` (same reasoning as above — not `push`) instead of
+setting the generic `payError` message. Any other non-ok response (404, 5xx) keeps
+today's generic inline error behavior.
 
 ## Error semantics
 
@@ -220,13 +246,22 @@ plus `typecheck`/`lint`/`build`.
    Mode session id; no second payable session is created.
 7. **Session expires mid-poll** — simulated by clearing the session cookie while
    `AuditPending` is actively polling; confirms the interval stops, the browser is
-   redirected to `/login`, and the audit is never shown as `"failed"`.
-8. **Audit created via `POST /api/audits` while authenticated** — confirms the created
+   redirected to `/login` via `replace` (confirmed by checking that browser Back from
+   `/login` does not return to the audit page), and the audit is never shown as `"failed"`.
+8. **Completed audit with permanently missing report/metrics** — simulated by pointing
+   the page at a completed audit whose joined data is deliberately absent; confirms the
+   page throws/surfaces an error boundary rather than looping between `AuditPending`
+   and a refresh.
+9. **Audit created via `POST /api/audits` while authenticated** — confirms the created
    row's `user_id` matches the authenticated user.
-9. `typecheck`, `lint`, `build` all green.
+10. `typecheck`, `lint`, `build` all green.
 
 **Test data protocol:** every test audit id and test user id is listed out before
-cleanup; all of them are explicitly deleted afterward (test users via
-`supabase.auth.admin.deleteUser`, matching this engagement's established pattern); any
-Stripe Test Mode session created during verification is disclosed by id. No leftover
-rows in the database and a clean working tree at the end.
+cleanup. For each test user, sessions are signed out/revoked where the Admin API allows
+it **before** calling `supabase.auth.admin.deleteUser` — deleting the user record alone
+does not guarantee immediate invalidation of any JWT already issued to it, since
+Supabase access tokens are self-contained and valid until they expire regardless of
+whether the underlying user still exists. Audits and users are deleted by explicit id
+either way, deletion is not skipped because revocation isn't available for a given
+case. Any Stripe Test Mode session created during verification is disclosed by id. No
+leftover rows in the database and a clean working tree at the end.
