@@ -19,8 +19,25 @@ function buildWalkthrough(page: ExtractedPage): string[] {
   const foldText = page.aboveFold.text.trim();
   if (foldText) steps.push(`Just below it: “${foldText.slice(0, 150)}${foldText.length > 150 ? "…" : ""}”`);
   if (page.cookieBanner.detected) steps.push("Before I can read further, a cookie consent banner asks me to decide.");
-  for (const journey of page.ctaJourneys.slice(0, 3)) {
-    steps.push(journey.sameOrigin ? `I click “${journey.text}” — ${journey.outcome.toLowerCase()}.` : `I click “${journey.text}” — it sends me to an external site.`);
+
+  const evidenceJourneys = page.evidence?.desktop.ctaJourneys;
+  if (evidenceJourneys) {
+    // Verified-action language ("I click… it loads…") only when a real navigation
+    // actually happened — everything else (external, skipped, blocked) gets
+    // observation-of-non-action language instead.
+    for (const journey of evidenceJourneys.slice(0, 3)) {
+      if (journey.navigationAttempted && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
+        steps.push(`I click “${journey.text}” — it ${journey.outcome === "redirected" ? "redirects and loads" : "loads"}.`);
+      } else if (journey.outcome === "external-not-visited") {
+        steps.push(`I see “${journey.text}” — it points to an external site, not visited in this audit.`);
+      } else {
+        steps.push(`I see “${journey.text}” — not tested in this audit.`);
+      }
+    }
+  } else {
+    for (const journey of page.ctaJourneys.slice(0, 3)) {
+      steps.push(journey.sameOrigin ? `I click “${journey.text}” — ${journey.outcome.toLowerCase()}.` : `I click “${journey.text}” — it sends me to an external site.`);
+    }
   }
   return steps;
 }
@@ -69,7 +86,14 @@ export function ReportView({ audit }: { audit: AuditRecord }) {
 
       <section id="copy" className="bg-accent-soft"><div className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><div className="grid gap-12 lg:grid-cols-[.6fr_1.4fr]"><div><Sparkles className="size-8 text-primary" /><h2 className="display mt-6 text-5xl md:text-6xl">Say it better.</h2><p className="mt-6 max-w-sm text-sm leading-6 text-muted-foreground">Ready-to-test rewrites based on the offer and evidence already on your page. Two directions per suggestion — pick one, or A/B test both.</p></div><div className="space-y-4">{report.copySuggestions.map((suggestion) => <article key={suggestion.label} className="rounded-2xl border bg-white p-6 md:p-8"><Badge>{suggestion.label}</Badge><div className="mt-6"><span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Before</span><p className="mt-2 text-lg text-muted-foreground line-through decoration-red-400/70">{suggestion.before}</p></div><div className="mt-5 grid gap-3 sm:grid-cols-2"><div className="rounded-xl border bg-background p-4"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-bold uppercase tracking-widest text-foreground">Rewrite</span><CopyButton text={suggestion.after} /></div><p className="mt-2 text-base font-bold">{suggestion.after}</p></div><div className="rounded-xl border bg-background p-4"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-bold uppercase tracking-widest text-foreground">Alternative</span><CopyButton text={suggestion.alternative} /></div><p className="mt-2 text-base font-bold">{suggestion.alternative}</p></div></div><p className="mt-6 border-t pt-4 text-xs leading-5 text-muted-foreground">{suggestion.rationale}</p></article>)}</div></div></div></section>
 
-      <section id="technical" className="bg-white"><div className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><span className="eyebrow">Technical snapshot</span><div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[["Performance", metrics.performanceScore, Gauge], ["Accessibility", metrics.accessibilityScore, Target], ["SEO", metrics.seoScore, Sparkles], ["Best practices", metrics.bestPracticesScore, Check]].map(([label, value, Icon]) => { const MetricIcon = Icon as typeof Gauge; return <Card key={String(label)} className="p-6"><MetricIcon className="size-5 text-primary" /><strong className="display mt-8 block text-5xl">{String(value)}</strong><span className="text-xs font-bold text-muted-foreground">{String(label)}</span></Card>; })}</div><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[["LCP", metric(metrics.lcp, "ms")], ["CLS", metric(metrics.cls)], ["TBT / INP", metric(metrics.inpOrTbt, "ms")], ["TTFB", metric(metrics.ttfb, "ms")]].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b py-5"><span className="text-xs text-muted-foreground">{label}</span><strong className="font-mono">{value}</strong></div>)}</div>{metrics.imageIssues.length > 0 && <div className="mt-8 flex gap-3 rounded-xl border border-amber-300/50 bg-amber-50 p-5 text-sm"><AlertTriangle className="size-5 shrink-0 text-amber-700" /><div><strong>Image opportunity</strong><p className="mt-1 text-muted-foreground">{metrics.imageIssues.join(" · ")}</p></div></div>}</div></section>
+      <section id="technical" className="bg-white"><div className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><span className="eyebrow">Technical snapshot</span><div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[["Performance", metrics.performanceScore, Gauge], ["Accessibility", metrics.accessibilityScore, Target], ["SEO", metrics.seoScore, Sparkles], ["Best practices", metrics.bestPracticesScore, Check]].map(([label, value, Icon]) => { const MetricIcon = Icon as typeof Gauge; return <Card key={String(label)} className="p-6"><MetricIcon className="size-5 text-primary" /><strong className="display mt-8 block text-5xl">{String(value)}</strong><span className="text-xs font-bold text-muted-foreground">{String(label)}</span></Card>; })}</div><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[
+              ["LCP", metric(metrics.lcp, "ms")],
+              ["CLS", metric(metrics.cls)],
+              ...(audit.page?.evidence
+                ? [["TBT (lab proxy)", metric(audit.page.evidence.performance.lab.tbt, "ms")], ["INP (field)", audit.page.evidence.performance.field.status === "not-assessed" ? "Not assessed" : metric(audit.page.evidence.performance.field.inp, "ms")]]
+                : [["Legacy responsiveness metric — source not recorded", metric(metrics.inpOrTbt, "ms")]]),
+              ["TTFB", metric(metrics.ttfb, "ms")],
+            ].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b py-5"><span className="text-xs text-muted-foreground">{label}</span><strong className="font-mono">{value}</strong></div>)}</div>{metrics.imageIssues.length > 0 && <div className="mt-8 flex gap-3 rounded-xl border border-amber-300/50 bg-amber-50 p-5 text-sm"><AlertTriangle className="size-5 shrink-0 text-amber-700" /><div><strong>Image opportunity</strong><p className="mt-1 text-muted-foreground">{metrics.imageIssues.join(" · ")}</p></div></div>}</div></section>
 
       <section className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><div className="grid gap-12 lg:grid-cols-2"><div><span className="eyebrow">Quick wins</span><div className="mt-7 space-y-3">{report.quickWins.map((item) => <div key={item} className="flex gap-3 rounded-xl border bg-white p-5 text-sm font-bold"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"><Check className="size-3" /></span>{item}</div>)}</div></div><div><span className="eyebrow">Longer-term</span><div className="mt-7 space-y-3">{report.longTermImprovements.map((item, index) => <div key={item} className="flex gap-4 border-b py-5 text-sm"><span className="font-mono text-xs text-muted-foreground">0{index + 1}</span><span className="font-bold">{item}</span></div>)}</div></div></div></section>
     </main>

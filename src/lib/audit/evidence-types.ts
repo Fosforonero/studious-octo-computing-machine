@@ -233,7 +233,12 @@ export interface AccessibilityEvidence {
     browserObservations: { imagesWithoutAlt: number; formInputsWithoutLabel: number; landmarksPresent: string[] };
   };
   mobile: {
-    automatedChecks: { source: "lighthouse"; status: "not-assessed"; score: null; failedAudits: [] };
+    // failedAudits is always empty at runtime (mobile has no separate Lighthouse run,
+    // enforced by the Zod schema's .max(0)) — typed as a regular array, not a literal
+    // `[]` tuple, since Zod's inferred output type for a length-capped array is
+    // AccessibilityObservation[], and forcing the stricter tuple type here would fight
+    // that inference for no real safety gain.
+    automatedChecks: { source: "lighthouse"; status: "not-assessed"; score: null; failedAudits: AccessibilityObservation[] };
     browserObservations: { imagesWithoutAlt: number; formInputsWithoutLabel: number; landmarksPresent: string[] };
   };
   requiresHumanVerification: string[];

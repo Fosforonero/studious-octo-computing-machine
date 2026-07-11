@@ -1,5 +1,18 @@
 import { getSupabaseAdmin } from "@/lib/db/client";
 import type { AuditMetrics, AuditRecord, ExtractedPage, FinalReport } from "@/lib/audit/types";
+import type { AuditEvidenceV2 } from "@/lib/audit/evidence-types";
+import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
+
+// A corrupt or pre-Evidence-Contract-v2 row must never throw up through a page/API
+// route — it degrades to `undefined`, exactly like a legacy row with no evidence at
+// all, with only a sanitized log line (audit id + issue count/paths, never values).
+function parseEvidence(auditId: string, raw: unknown): AuditEvidenceV2 | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const result = AuditEvidenceV2Schema.safeParse(raw);
+  if (result.success) return result.data;
+  console.error(`[audits] evidence failed validation for ${auditId}, treating as absent`, { issueCount: result.error.issues.length, paths: result.error.issues.map((issue) => issue.path.join(".")).slice(0, 10) });
+  return undefined;
+}
 
 function mapAudit(row: Record<string, unknown>): AuditRecord {
   return { id: String(row.id), url: String(row.url), normalizedUrl: String(row.normalized_url), pageGoal: String(row.page_goal ?? "Not specified"), status: row.status as AuditRecord["status"], paid: Boolean(row.paid), stripeCheckoutSessionId: (row.stripe_checkout_session_id as string | null) ?? null, userId: (row.user_id as string | null) ?? null, overallScore: row.overall_score as number | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null, errorMessage: row.error_message as string | null };
@@ -30,7 +43,10 @@ export async function getAudit(id: string): Promise<AuditRecord | null> {
   if (error) throw error;
   if (!audit) return null;
   const result = mapAudit(audit);
-  if (page) result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
+  if (page) {
+    result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
+    result.page.evidence = parseEvidence(id, (page.extracted_json as { evidence?: unknown } | null)?.evidence);
+  }
   if (metrics) result.metrics = { performanceScore: metrics.performance_score, accessibilityScore: metrics.accessibility_score, seoScore: metrics.seo_score, bestPracticesScore: metrics.best_practices_score, lcp: metrics.lcp, cls: metrics.cls, inpOrTbt: metrics.inp_or_tbt, ttfb: metrics.ttfb, imageIssues: metrics.image_issues ?? [], renderBlockingResources: metrics.render_blocking_resources ?? 0, scriptWeightBytes: metrics.script_weight_bytes ?? 0 };
   if (report) result.report = report.report_json as FinalReport;
   return result;
@@ -70,7 +86,10 @@ export async function getOwnedAuditFull(id: string, userId: string): Promise<Aud
   const { data: metrics } = metricsResult;
   const { data: report } = reportResult;
   const result = mapAudit(row);
-  if (page) result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
+  if (page) {
+    result.page = { ...(page.extracted_json as ExtractedPage), desktopScreenshotPath: page.desktop_screenshot_url, mobileScreenshotPath: page.mobile_screenshot_url };
+    result.page.evidence = parseEvidence(id, (page.extracted_json as { evidence?: unknown } | null)?.evidence);
+  }
   if (metrics) result.metrics = { performanceScore: metrics.performance_score, accessibilityScore: metrics.accessibility_score, seoScore: metrics.seo_score, bestPracticesScore: metrics.best_practices_score, lcp: metrics.lcp, cls: metrics.cls, inpOrTbt: metrics.inp_or_tbt, ttfb: metrics.ttfb, imageIssues: metrics.image_issues ?? [], renderBlockingResources: metrics.render_blocking_resources ?? 0, scriptWeightBytes: metrics.script_weight_bytes ?? 0 };
   if (report) result.report = report.report_json as FinalReport;
   return result;
