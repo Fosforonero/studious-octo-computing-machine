@@ -1,23 +1,34 @@
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import { assertSafeUrl } from "@/lib/security/url";
 import type { ExtractedPage } from "@/lib/audit/types";
+import type { BrowserEvidence, CookieBannerEvidence, ConsoleNetworkEvidence, CtaJourneyEvidence, CtaOutcome, EvidenceStatus, JsonLdEvidence, SeoEvidence, TestExecutionRecord } from "@/lib/audit/evidence-types";
+import { hashContent, redactSensitivePatterns, sanitizeText, sanitizeUrl } from "@/lib/audit/evidence-sanitize";
+import { makeEvidenceId } from "@/lib/audit/evidence-id";
+import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
 
-export interface BrowserScanResult { page: ExtractedPage; desktopScreenshot: Buffer; mobileScreenshot: Buffer; ctaScreenshots: { index: number; buffer: Buffer }[]; }
+export interface BrowserScanResult {
+  page: ExtractedPage;
+  desktopScreenshot: Buffer;
+  mobileScreenshot: Buffer;
+  ctaScreenshots: { evidenceId: string; buffer: Buffer }[];
+  cookieBannerScreenshots: { desktop: { before?: Buffer; after?: Buffer }; mobile: { before?: Buffer; after?: Buffer } };
+  evidenceParts: {
+    seo: SeoEvidence;
+    desktop: { browser: BrowserEvidence; console: ConsoleNetworkEvidence; ctaJourneys: CtaJourneyEvidence[] };
+    mobile: { browser: BrowserEvidence; console: ConsoleNetworkEvidence };
+    tests: TestExecutionRecord[];
+    redirects: { from: string; to: string; status: number }[];
+    userAgentDesktop: string;
+    userAgentMobile: string;
+  };
+}
 
 const COOKIE_CONSENT_PATTERNS = [/accept all/i, /accept cookies/i, /^accept$/i, /i accept/i, /^agree$/i, /i agree/i, /got it/i, /allow all/i, /accetta tutto/i, /^accetta$/i, /acconsento/i, /consenti tutto/i, /ho capito/i];
 
-async function dismissCookieBanner(page: Page): Promise<boolean> {
-  for (const pattern of COOKIE_CONSENT_PATTERNS) {
-    const button = page.getByRole("button", { name: pattern }).first();
-    try {
-      if (await button.isVisible({ timeout: 400 })) {
-        await button.click({ timeout: 1500 });
-        await page.waitForTimeout(400);
-        return true;
-      }
-    } catch { /* pattern not present, try the next one */ }
-  }
-  return false;
+const MAX_SCREENSHOT_BYTES = 3_000_000;
+
+function capScreenshot(buffer: Buffer): Buffer | undefined {
+  return buffer.length <= MAX_SCREENSHOT_BYTES ? buffer : undefined;
 }
 
 async function secureContext(context: BrowserContext) {
@@ -28,7 +39,7 @@ async function secureContext(context: BrowserContext) {
   await context.addInitScript(() => { (window as unknown as { __name?: (fn: unknown, name?: string) => unknown }).__name ??= (fn: unknown) => fn; });
   await context.route("**/*", async (route) => {
     const requestUrl = route.request().url();
-    if (!requestUrl.startsWith("http:" ) && !requestUrl.startsWith("https:")) return route.continue();
+    if (!requestUrl.startsWith("http:") && !requestUrl.startsWith("https:")) return route.continue();
     try {
       await assertSafeUrl(requestUrl);
       await route.continue();
@@ -36,10 +47,11 @@ async function secureContext(context: BrowserContext) {
   });
 }
 
-async function settle(page: Page, url: string) {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+async function settle(page: Page, url: string): Promise<Response | null> {
+  const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
   await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
   await page.waitForTimeout(700);
+  return response;
 }
 
 async function extract(page: Page): Promise<ExtractedPage> {
@@ -84,24 +96,215 @@ async function extract(page: Page): Promise<ExtractedPage> {
   });
 }
 
-async function testCtaJourneys(context: BrowserContext, sourceUrl: string, ctas: ExtractedPage["ctas"]) {
+async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Promise<BrowserEvidence> {
+  const GEOMETRY_TIME_BUDGET_MS = 2000;
+  const geometry = await page.evaluate((budgetMs: number) => {
+    const start = performance.now();
+    const timeLeft = () => performance.now() - start < budgetMs;
+    const rects = [...document.querySelectorAll("body *")].filter((el) => {
+      const r = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    });
+    const hasHorizontalOverflow = document.documentElement.scrollWidth > document.documentElement.clientWidth + 1;
+    const describeSelector = (el: Element) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${el.className && typeof el.className === "string" ? `.${el.className.trim().split(/\s+/).slice(0, 2).join(".")}` : ""}`;
+
+    const overlapCandidates: { selector: string; overlapsWithSelector: string; issue: "cutoff" | "overlap"; boundingBox: { x: number; y: number; width: number; height: number } }[] = [];
+    for (const a of rects.slice(0, 400)) {
+      if (!timeLeft() || overlapCandidates.length >= 30) break;
+      const aRect = a.getBoundingClientRect();
+      const parent = a.parentElement;
+      if (parent) {
+        const pRect = parent.getBoundingClientRect();
+        if (aRect.right > pRect.right + 2 || aRect.bottom > pRect.bottom + 2) {
+          overlapCandidates.push({ selector: describeSelector(a), overlapsWithSelector: describeSelector(parent), issue: "cutoff", boundingBox: { x: aRect.x, y: aRect.y, width: aRect.width, height: aRect.height } });
+        }
+      }
+    }
+
+    const smallTapTargetCandidates: { selector: string; boundingBox: { x: number; y: number; width: number; height: number }; widthPx: number; heightPx: number }[] = [];
+    const interactive = rects.filter((el) => el.tagName === "A" || el.tagName === "BUTTON" || el.getAttribute("role") === "button" || el.tagName === "INPUT");
+    for (const el of interactive.slice(0, 200)) {
+      if (!timeLeft() || smallTapTargetCandidates.length >= 30) break;
+      const r = el.getBoundingClientRect();
+      if (r.width < 24 || r.height < 24) smallTapTargetCandidates.push({ selector: describeSelector(el), boundingBox: { x: r.x, y: r.y, width: r.width, height: r.height }, widthPx: Math.round(r.width), heightPx: Math.round(r.height) });
+    }
+
+    const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+    const visible = (el: Element) => rects.includes(el);
+    const headingHierarchy = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].filter(visible).map((node) => ({ level: Number(node.tagName[1]), text: clean(node.textContent) })).filter((item) => item.text).slice(0, 80);
+    const headline = headingHierarchy.find((h) => h.level === 1)?.text ?? headingHierarchy[0]?.text ?? null;
+    const ctaNodes = [...document.querySelectorAll("button,a[href]")].filter(visible);
+    const ctasVisible = ctaNodes.map((node) => ({ text: clean(node.textContent), href: node instanceof HTMLAnchorElement ? node.href : "", tag: node.tagName.toLowerCase(), position: (node.getBoundingClientRect().top < window.innerHeight ? "above-fold" : "below-fold") as "above-fold" | "below-fold" })).filter((c) => c.text).slice(0, 50);
+    const foldNodes = rects.filter((node) => { const r = node.getBoundingClientRect(); return r.top >= 0 && r.top < window.innerHeight && node.children.length === 0; });
+    const aboveFoldText = clean(foldNodes.map((n) => n.textContent).join(" ")).slice(0, 5000);
+    const aboveFoldCtas = ctasVisible.filter((c) => c.position === "above-fold").map((c) => c.text);
+    const imageCount = [...document.images].filter((img) => img.getBoundingClientRect().top < window.innerHeight).length;
+    const forms = [...document.forms].map((form) => ({
+      action: form.action,
+      inputs: [...form.elements].map((field) => {
+        const input = field as HTMLInputElement;
+        const hasLabel = Boolean(input.labels?.length) || Boolean(input.getAttribute("aria-label")) || Boolean(input.getAttribute("aria-labelledby"));
+        return { name: input.name || "", type: input.type || input.tagName.toLowerCase(), hasLabel };
+      }).slice(0, 30),
+    })).slice(0, 20);
+    const images = [...document.images].slice(0, 50).map((img) => ({ src: img.src, hasAlt: img.alt.trim().length > 0, aboveFold: img.getBoundingClientRect().top < window.innerHeight }));
+
+    return {
+      hasHorizontalOverflow,
+      overlapCandidates,
+      smallTapTargetCandidates,
+      headline,
+      headingHierarchy,
+      ctasVisible,
+      navPresent: Boolean(document.querySelector("nav")),
+      aboveFold: { text: aboveFoldText, ctas: aboveFoldCtas, imageCount },
+      forms,
+      landmarks: { hasNav: Boolean(document.querySelector("nav")), hasFooter: Boolean(document.querySelector("footer")), hasMain: Boolean(document.querySelector("main")) },
+      images,
+    };
+  }, GEOMETRY_TIME_BUDGET_MS);
+
+  return {
+    viewport,
+    headline: geometry.headline,
+    headingHierarchy: geometry.headingHierarchy,
+    aboveFold: { text: geometry.aboveFold.text, ctaTexts: geometry.aboveFold.ctas, imageCount: geometry.aboveFold.imageCount },
+    ctasVisible: geometry.ctasVisible,
+    navPresent: geometry.navPresent,
+    hasHorizontalOverflow: geometry.hasHorizontalOverflow,
+    // Geometry itself is "verified" — it was measured. Whether a candidate represents a
+    // real problem is always "inferred": an overlay can be intentional, a small target
+    // can satisfy one of WCAG 2.5.8's five exceptions. Never claim "verified" on the
+    // conclusion, only on the fact that the scan ran.
+    overlapCandidates: geometry.overlapCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("overlap", viewport, c.selector, c.issue), status: "inferred" as const })),
+    overlapCandidatesStatus: "verified",
+    smallTapTargetCandidates: viewport === "mobile" ? geometry.smallTapTargetCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("tap-target", viewport, c.selector), status: "inferred" as const })) : null,
+    smallTapTargetCandidatesStatus: viewport === "mobile" ? "verified" : "not-assessed",
+    forms: geometry.forms,
+    landmarks: geometry.landmarks,
+    images: geometry.images,
+    cookieBanner: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] },
+  };
+}
+
+async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: CookieBannerEvidence; beforeScreenshot?: Buffer; afterScreenshot?: Buffer }> {
+  const detection = await page.evaluate(() => {
+    const candidates = [...document.querySelectorAll("[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[role=dialog]")];
+    const banner = candidates.find((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    });
+    if (!banner) return { detected: false, buttonsFound: [] as string[], blocking: null as boolean | null };
+    const buttons = [...banner.querySelectorAll("button,a[role=button],a")].map((b) => (b.textContent ?? "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 10);
+    const style = window.getComputedStyle(banner);
+    const rect = banner.getBoundingClientRect();
+    const coversMost = rect.width >= window.innerWidth * 0.6 && rect.height >= window.innerHeight * 0.6;
+    const isFixedOrSticky = style.position === "fixed" || style.position === "sticky";
+    const bodyLocked = window.getComputedStyle(document.body).overflow === "hidden";
+    return { detected: true, buttonsFound: buttons, blocking: (coversMost && isFixedOrSticky) || bodyLocked };
+  });
+
+  // Screenshots are captured only when a banner was actually detected — never
+  // speculatively, and never for a page with no banner at all.
+  if (!detection.detected) {
+    return { evidence: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } };
+  }
+
+  let beforeScreenshot: Buffer | undefined;
+  try { beforeScreenshot = capScreenshot(Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 }))); } catch { /* screenshot best-effort */ }
+
+  let dismissed = false;
+  for (const pattern of COOKIE_CONSENT_PATTERNS) {
+    const button = page.getByRole("button", { name: pattern }).first();
+    try {
+      if (await button.isVisible({ timeout: 400 })) {
+        await button.click({ timeout: 1500 });
+        await page.waitForTimeout(400);
+        dismissed = true;
+        break;
+      }
+    } catch { /* pattern not present, try the next one */ }
+  }
+
+  let afterScreenshot: Buffer | undefined;
+  try { afterScreenshot = capScreenshot(Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 }))); } catch { /* screenshot best-effort */ }
+
+  return {
+    evidence: {
+      detected: true,
+      dismissAttempted: true,
+      dismissed,
+      blocking: detection.blocking,
+      blockingStatus: detection.blocking === null ? "not-assessed" : "verified",
+      buttonsFound: detection.buttonsFound,
+    },
+    beforeScreenshot,
+    afterScreenshot,
+  };
+}
+
+async function countRedirects(response: Response | null): Promise<number> {
+  let count = 0;
+  let current = response?.request().redirectedFrom() ?? null;
+  while (current) { count += 1; current = current.redirectedFrom(); }
+  return count;
+}
+
+function isSafetyBlock(message: string): boolean {
+  return /blockedbyclient|private network|resolves to a private|cannot be audited|could not be resolved/i.test(message);
+}
+
+async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, ctas: ExtractedPage["ctas"]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
   const source = new URL(sourceUrl);
-  const candidates = ctas.filter((cta) => cta.href && ["http:", "https:"].includes(new URL(cta.href, source).protocol)).slice(0, 5);
-  return Promise.all(candidates.map(async (cta) => {
+  const httpCandidates = ctas.filter((cta) => { try { return ["http:", "https:"].includes(new URL(cta.href, source).protocol); } catch { return false; } });
+  const invalidCandidates = ctas.filter((cta) => !httpCandidates.includes(cta));
+  const tested = httpCandidates.slice(0, 5);
+  const overLimit = httpCandidates.slice(5);
+
+  const testedResults = await Promise.all(tested.map(async (cta) => {
     const destination = new URL(cta.href, source);
     const sameOrigin = destination.origin === source.origin;
-    if (!sameOrigin) return { text: cta.text, destination: destination.toString(), outcome: "External destination detected", sameOrigin, screenshot: undefined as Buffer | undefined };
+    const evidenceId = makeEvidenceId("cta", destination.toString(), cta.text);
+    if (!sameOrigin) {
+      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } };
+    }
     const probe = await context.newPage();
     try {
       const response = await probe.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
       await assertSafeUrl(probe.url());
-      const title = await probe.title();
+      const redirectCount = await countRedirects(response);
       const screenshot = response?.ok() ? Buffer.from(await probe.screenshot({ type: "jpeg", quality: 70 })) : undefined;
-      return { text: cta.text, destination: probe.url(), outcome: response?.ok() ? `Loaded: ${title || response.status()}` : `HTTP ${response?.status() ?? "error"}`, sameOrigin, screenshot };
+      const outcome: CtaOutcome = !response ? "network-error" : !response.ok() ? "http-error" : redirectCount > 0 ? "redirected" : "navigated";
+      return {
+        evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, finalUrl: probe.url(), redirectCount, httpStatus: response?.status(), outcome, error: outcome === "network-error" ? "No response received" : undefined },
+        screenshot,
+      };
     } catch (error) {
-      return { text: cta.text, destination: destination.toString(), outcome: error instanceof Error ? error.message.slice(0, 120) : "Could not load", sameOrigin, screenshot: undefined as Buffer | undefined };
-    } finally { await probe.close(); }
+      const message = error instanceof Error ? error.message : "Could not load";
+      // A redirect toward a private/unsafe address is a deliberate protection firing,
+      // not a generic transport failure — record it distinctly, with a fixed generic
+      // message so the real (possibly private) address is never persisted.
+      if (isSafetyBlock(message)) {
+        return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "blocked-unsafe-redirect" as const, error: "Blocked: navigation to a private/unsafe address was prevented" } };
+      }
+      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "network-error" as const, error: message.slice(0, 300) } };
+    } finally {
+      await probe.close();
+    }
   }));
+
+  const overLimitResults = overLimit.map((cta) => {
+    const destination = new URL(cta.href, source);
+    return { evidence: { evidenceId: makeEvidenceId("cta", destination.toString(), cta.text), text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin: destination.origin === source.origin, navigationAttempted: false, outcome: "skipped-limit" as const, skippedReason: "Not tested — audit is capped at the first 5 conversion paths" } };
+  });
+
+  const invalidResults = invalidCandidates.map((cta) => ({
+    evidence: { evidenceId: makeEvidenceId("cta", cta.href, cta.text), text: cta.text, element: cta.tag, declaredUrl: cta.href, sameOrigin: false, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" },
+  }));
+
+  return [...testedResults, ...overLimitResults, ...invalidResults];
 }
 
 async function addAnnotations(page: Page, ctas: ExtractedPage["ctas"]) {
@@ -119,36 +322,226 @@ async function addAnnotations(page: Page, ctas: ExtractedPage["ctas"]) {
   }, ctas.map((cta) => cta.text));
 }
 
+async function extractSeoEvidence(page: Page, response: Response | null): Promise<SeoEvidence> {
+  const raw = await page.evaluate(() => {
+    const attr = (selector: string, name: string) => document.querySelector(selector)?.getAttribute(name) ?? null;
+    return {
+      canonical: attr('link[rel="canonical"]', "href"),
+      robotsMeta: attr('meta[name="robots"]', "content"),
+      htmlLang: document.documentElement.getAttribute("lang"),
+      viewportMeta: attr('meta[name="viewport"]', "content"),
+      hreflang: [...document.querySelectorAll('link[rel="alternate"][hreflang]')].map((el) => ({ lang: el.getAttribute("hreflang") ?? "", href: (el as HTMLLinkElement).href })).slice(0, 50),
+      openGraph: [...document.querySelectorAll('meta[property^="og:"]')].map((el) => ({ property: el.getAttribute("property") ?? "", content: el.getAttribute("content") ?? "" })).slice(0, 30),
+      jsonLdScripts: [...document.querySelectorAll('script[type="application/ld+json"]')].map((el) => el.textContent ?? "").slice(0, 10),
+      links: [...document.querySelectorAll("a[href]")].map((el) => ({ text: (el.textContent ?? "").replace(/\s+/g, " ").trim(), href: (el as HTMLAnchorElement).href })).slice(0, 150),
+      headings: [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].map((el) => ({ level: Number(el.tagName[1]), text: (el.textContent ?? "").replace(/\s+/g, " ").trim() })).filter((h) => h.text).slice(0, 80),
+      title: document.title,
+      metaDescription: attr('meta[name="description"]', "content"),
+      visibleText: (document.body.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 30_000),
+    };
+  });
+
+  const matchableTypes = new Set(["Product", "Article"]);
+  const jsonLd: JsonLdEvidence[] = raw.jsonLdScripts.map((script) => {
+    // Redact BEFORE hashing/excerpting — the hash and excerpt must never be derivable
+    // back to potentially sensitive raw content the page author embedded.
+    const redactedScript = redactSensitivePatterns(script);
+    const excerptHash = hashContent(redactedScript);
+    const evidenceId = `jsonld:${excerptHash.slice(0, 12)}`;
+    try {
+      const parsedJson = JSON.parse(script) as Record<string, unknown> & { "@type"?: string | string[] };
+      const types = Array.isArray(parsedJson["@type"]) ? (parsedJson["@type"] as string[]) : parsedJson["@type"] ? [parsedJson["@type"] as string] : [];
+      const matchableType = types.find((t) => matchableTypes.has(t));
+      let contentMatch: boolean | null = null;
+      let contentMatchStatus: EvidenceStatus = "not-assessed";
+      if (matchableType) {
+        const nameField = (parsedJson.name ?? parsedJson.headline) as string | undefined;
+        if (typeof nameField === "string" && nameField.trim()) {
+          // A substring match is deterministic but not a robust semantic verification —
+          // record it as "inferred", never "verified".
+          contentMatch = raw.visibleText.includes(nameField.trim());
+          contentMatchStatus = "inferred";
+        }
+      }
+      return { evidenceId, parsed: true, types, excerptHash, sanitizedExcerpt: sanitizeText(redactedScript, 400), contentMatch, contentMatchStatus };
+    } catch (error) {
+      return { evidenceId, parsed: false, types: [], parseError: sanitizeText(error instanceof Error ? error.message : "Invalid JSON-LD", 300), excerptHash, contentMatch: null, contentMatchStatus: "not-assessed" as const };
+    }
+  });
+
+  const redirectChain: { from: string; to: string; status: number }[] = [];
+  let current = response?.request().redirectedFrom() ?? null;
+  let previousUrl = response?.url();
+  while (current && redirectChain.length < 20) {
+    const currentResponse = await current.response();
+    if (currentResponse && previousUrl) redirectChain.unshift({ from: sanitizeUrl(current.url()), to: sanitizeUrl(previousUrl), status: currentResponse.status() });
+    previousUrl = current.url();
+    current = current.redirectedFrom();
+  }
+
+  return {
+    title: raw.title,
+    metaDescription: raw.metaDescription,
+    canonical: raw.canonical,
+    robotsMeta: raw.robotsMeta,
+    xRobotsTag: response?.headers()["x-robots-tag"] ?? null,
+    htmlLang: raw.htmlLang,
+    viewportMeta: raw.viewportMeta,
+    headings: raw.headings,
+    hreflang: raw.hreflang.map((h) => ({ evidenceId: makeEvidenceId("hreflang", h.lang, h.href), ...h })),
+    openGraph: raw.openGraph.map((og) => ({ evidenceId: makeEvidenceId("og", og.property, og.content), ...og })),
+    jsonLd,
+    links: raw.links.map((link) => ({ text: link.text, href: sanitizeUrl(link.href), sameOrigin: (() => { try { return new URL(link.href).origin === new URL(raw.canonical ?? response?.url() ?? "").origin; } catch { return false; } })() })),
+    pageStatus: { initialStatus: redirectChain[0]?.status ?? response?.status() ?? null, finalStatus: response?.status() ?? null, redirectChain },
+  };
+}
+
+const MAX_CONSOLE_ERRORS = 20;
+const MAX_FAILED_REQUESTS = 20;
+
+function attachConsoleNetworkCapture(page: Page): () => ConsoleNetworkEvidence {
+  const consoleErrors: { message: string; timestamp: string }[] = [];
+  const pageErrors: { message: string; timestamp: string }[] = [];
+  const failedRequests: { url: string; resourceType: string; domain: string; status: number | null; message?: string }[] = [];
+  let truncated = false;
+
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    if (consoleErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; }
+    consoleErrors.push({ message: sanitizeText(message.text(), 500), timestamp: new Date().toISOString() });
+  });
+  page.on("pageerror", (error) => {
+    if (pageErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; }
+    pageErrors.push({ message: sanitizeText(error.message, 500), timestamp: new Date().toISOString() });
+  });
+  page.on("requestfailed", (request) => {
+    if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; }
+    let domain = "";
+    try { domain = new URL(request.url()).hostname; } catch { /* ignore */ }
+    failedRequests.push({ url: sanitizeUrl(request.url()), resourceType: request.resourceType(), domain, status: null, message: sanitizeText(request.failure()?.errorText ?? "Request failed", 300) });
+  });
+  page.on("response", (response) => {
+    if (response.status() < 400) return;
+    if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; }
+    let domain = "";
+    try { domain = new URL(response.url()).hostname; } catch { /* ignore */ }
+    failedRequests.push({ url: sanitizeUrl(response.url()), resourceType: response.request().resourceType(), domain, status: response.status() });
+  });
+
+  return () => ({
+    consoleErrors: dedupe(consoleErrors).map((e) => ({ evidenceId: makeEvidenceId("console", e.message), ...e })),
+    pageErrors: dedupe(pageErrors).map((e) => ({ evidenceId: makeEvidenceId("pageerror", e.message), ...e })),
+    failedRequests: failedRequests.map((r) => ({ evidenceId: makeEvidenceId("network", r.url, r.resourceType), ...r })),
+    limits: { maxConsoleErrors: MAX_CONSOLE_ERRORS, maxFailedRequests: MAX_FAILED_REQUESTS, truncated },
+  });
+}
+
+function dedupe<T extends { message: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => (seen.has(item.message) ? false : (seen.add(item.message), true)));
+}
+
 export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult> {
   const url = await assertSafeUrl(inputUrl);
   const browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage"] });
+  const tests: TestExecutionRecord[] = [];
+  const desktopUserAgent = "LensiqBot/0.1 (+https://lensiq.site/bot)";
+  const mobileUserAgent = "LensiqBot/0.1 mobile (+https://lensiq.site/bot)";
   try {
-    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, userAgent: "LensiqBot/0.1 (+https://lensiq.site/bot)" });
+    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, userAgent: desktopUserAgent });
     await secureContext(desktop);
     const desktopPage = await desktop.newPage();
-    await settle(desktopPage, url);
+    const desktopConsoleCapture = attachConsoleNetworkCapture(desktopPage);
+    let desktopResponse: Response | null = null;
+    try {
+      desktopResponse = await settle(desktopPage, url);
+      tests.push({ id: "desktop-dom", status: "passed" });
+    } catch (error) {
+      tests.push({ id: "desktop-dom", status: "failed", reason: error instanceof Error ? error.message : "Navigation failed" });
+      throw error;
+    }
     await assertSafeUrl(desktopPage.url());
-    const cookieDismissedDesktop = await dismissCookieBanner(desktopPage);
+    const cookieDesktop = await detectAndDismissCookieBanner(desktopPage);
+    tests.push({ id: "cookie-banner-desktop", status: "passed" });
     const pageData = await extract(desktopPage);
-    pageData.cookieBanner = { detected: cookieDismissedDesktop, dismissed: cookieDismissedDesktop };
-    const ctaResults = await testCtaJourneys(desktop, pageData.url, pageData.ctas);
-    pageData.ctaJourneys = ctaResults.map((result) => ({ text: result.text, destination: result.destination, outcome: result.outcome, sameOrigin: result.sameOrigin }));
+    pageData.cookieBanner = deriveLegacyCookieBanner(cookieDesktop.evidence);
+    const desktopEvidenceBrowser = await extractEvidence(desktopPage, "desktop");
+    desktopEvidenceBrowser.cookieBanner = cookieDesktop.evidence;
+
+    // cta-journey-desktop failures are recorded but not rethrown — a broken
+    // conversion-path check shouldn't fail an otherwise-complete audit. Contrast with
+    // desktop-dom/seo-extraction below, which ARE foundational and do rethrow.
+    let ctaResults: { evidence: CtaJourneyEvidence; screenshot?: Buffer }[] = [];
+    try {
+      ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, pageData.ctas);
+      tests.push({ id: "cta-journey-desktop", status: "passed" });
+    } catch (error) {
+      tests.push({ id: "cta-journey-desktop", status: "failed", reason: error instanceof Error ? error.message : "CTA journey testing failed" });
+    }
+    tests.push({ id: "cta-journey-mobile", status: "skipped", reason: "single-page audit tests conversion paths once, on desktop, to bound audit runtime" });
+    pageData.ctaJourneys = deriveLegacyCtaJourneys(ctaResults.map((r) => r.evidence));
     const ctaScreenshots = ctaResults
-      .map((result, index) => ({ index, buffer: result.screenshot }))
-      .filter((entry): entry is { index: number; buffer: Buffer } => Boolean(entry.buffer));
+      .map((result) => ({ evidenceId: result.evidence.evidenceId, buffer: result.screenshot }))
+      .filter((entry): entry is { evidenceId: string; buffer: Buffer } => Boolean(entry.buffer));
+
+    let seoEvidence: SeoEvidence;
+    try {
+      seoEvidence = await extractSeoEvidence(desktopPage, desktopResponse);
+      tests.push({ id: "seo-extraction", status: "passed" });
+    } catch (error) {
+      tests.push({ id: "seo-extraction", status: "failed", reason: error instanceof Error ? error.message : "SEO extraction failed" });
+      throw error;
+    }
+
+    const desktopConsoleNetwork = desktopConsoleCapture();
+    tests.push({ id: "console-network-desktop", status: "passed" });
+
     await addAnnotations(desktopPage, pageData.ctas);
     const desktopScreenshot = await desktopPage.screenshot({ fullPage: true, type: "jpeg", quality: 78 });
     await desktop.close();
 
-    const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, userAgent: "LensiqBot/0.1 mobile (+https://lensiq.site/bot)" });
+    const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, userAgent: mobileUserAgent });
     await secureContext(mobile);
     const mobilePage = await mobile.newPage();
-    await settle(mobilePage, pageData.url);
+    const mobileConsoleCapture = attachConsoleNetworkCapture(mobilePage);
+    try {
+      await settle(mobilePage, pageData.url);
+      tests.push({ id: "mobile-dom", status: "passed" });
+    } catch (error) {
+      tests.push({ id: "mobile-dom", status: "failed", reason: error instanceof Error ? error.message : "Navigation failed" });
+      throw error;
+    }
     await assertSafeUrl(mobilePage.url());
-    await dismissCookieBanner(mobilePage);
+    const cookieMobile = await detectAndDismissCookieBanner(mobilePage);
+    tests.push({ id: "cookie-banner-mobile", status: "passed" });
+    const mobileEvidenceBrowser = await extractEvidence(mobilePage, "mobile");
+    mobileEvidenceBrowser.cookieBanner = cookieMobile.evidence;
+    const mobileConsoleNetwork = mobileConsoleCapture();
+    tests.push({ id: "console-network-mobile", status: "passed" });
     await addAnnotations(mobilePage, pageData.ctas);
     const mobileScreenshot = await mobilePage.screenshot({ fullPage: true, type: "jpeg", quality: 75 });
     await mobile.close();
-    return { page: pageData, desktopScreenshot: Buffer.from(desktopScreenshot), mobileScreenshot: Buffer.from(mobileScreenshot), ctaScreenshots };
-  } finally { await browser.close(); }
+
+    return {
+      page: pageData,
+      desktopScreenshot: Buffer.from(desktopScreenshot),
+      mobileScreenshot: Buffer.from(mobileScreenshot),
+      ctaScreenshots,
+      cookieBannerScreenshots: {
+        desktop: { before: cookieDesktop.beforeScreenshot, after: cookieDesktop.afterScreenshot },
+        mobile: { before: cookieMobile.beforeScreenshot, after: cookieMobile.afterScreenshot },
+      },
+      evidenceParts: {
+        seo: seoEvidence,
+        desktop: { browser: desktopEvidenceBrowser, console: desktopConsoleNetwork, ctaJourneys: ctaResults.map((r) => r.evidence) },
+        mobile: { browser: mobileEvidenceBrowser, console: mobileConsoleNetwork },
+        tests,
+        redirects: seoEvidence.pageStatus.redirectChain,
+        userAgentDesktop: desktopUserAgent,
+        userAgentMobile: mobileUserAgent,
+      },
+    };
+  } finally {
+    await browser.close();
+  }
 }
