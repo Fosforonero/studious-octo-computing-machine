@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { sanitizeUrl, sanitizeText, sanitizeEvidenceV2, hashContent } from "@/lib/audit/evidence-sanitize";
-import { makeEvidenceId } from "@/lib/audit/evidence-id";
+import { makeEvidenceId, dedupeEvidenceIds } from "@/lib/audit/evidence-id";
 import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
 import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
 import type { AuditEvidenceV2, CtaJourneyEvidence } from "@/lib/audit/evidence-types";
@@ -125,6 +125,21 @@ test("evidenceIds are unique across a realistic set of records", () => {
     makeEvidenceId("network", "https://x.com/broken.png", "image"),
   ];
   assert.equal(new Set(ids).size, ids.length);
+});
+
+test("dedupeEvidenceIds gives colliding ids a stable, order-dependent suffix instead of silently merging", () => {
+  const items = [
+    { evidenceId: "cta:aaaa", text: "Subscribe" },
+    { evidenceId: "cta:aaaa", text: "Subscribe (second form)" },
+    { evidenceId: "cta:bbbb", text: "Learn more" },
+    { evidenceId: "cta:aaaa", text: "Subscribe (third form)" },
+  ];
+  const deduped = dedupeEvidenceIds(items);
+  const ids = deduped.map((i) => i.evidenceId);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(ids, ["cta:aaaa", "cta:aaaa-2", "cta:bbbb", "cta:aaaa-3"]);
+  // Re-running on the same input in the same order reproduces the same suffixes.
+  assert.deepEqual(dedupeEvidenceIds(items).map((i) => i.evidenceId), ids);
 });
 
 test("valid evidence parses successfully", () => {

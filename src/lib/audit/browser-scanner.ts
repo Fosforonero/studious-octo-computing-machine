@@ -3,7 +3,7 @@ import { assertSafeUrl } from "@/lib/security/url";
 import type { ExtractedPage } from "@/lib/audit/types";
 import type { BrowserEvidence, CookieBannerEvidence, ConsoleNetworkEvidence, CtaJourneyEvidence, CtaOutcome, EvidenceStatus, JsonLdEvidence, SeoEvidence, TestExecutionRecord } from "@/lib/audit/evidence-types";
 import { hashContent, redactSensitivePatterns, sanitizeText, sanitizeUrl } from "@/lib/audit/evidence-sanitize";
-import { makeEvidenceId } from "@/lib/audit/evidence-id";
+import { dedupeEvidenceIds, makeEvidenceId } from "@/lib/audit/evidence-id";
 import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
 
 export interface BrowserScanResult {
@@ -177,9 +177,9 @@ async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Prom
     // real problem is always "inferred": an overlay can be intentional, a small target
     // can satisfy one of WCAG 2.5.8's five exceptions. Never claim "verified" on the
     // conclusion, only on the fact that the scan ran.
-    overlapCandidates: geometry.overlapCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("overlap", viewport, c.selector, c.issue), status: "inferred" as const })),
+    overlapCandidates: dedupeEvidenceIds(geometry.overlapCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("overlap", viewport, c.selector, c.issue), status: "inferred" as const }))),
     overlapCandidatesStatus: "verified",
-    smallTapTargetCandidates: viewport === "mobile" ? geometry.smallTapTargetCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("tap-target", viewport, c.selector), status: "inferred" as const })) : null,
+    smallTapTargetCandidates: viewport === "mobile" ? dedupeEvidenceIds(geometry.smallTapTargetCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("tap-target", viewport, c.selector), status: "inferred" as const }))) : null,
     smallTapTargetCandidatesStatus: viewport === "mobile" ? "verified" : "not-assessed",
     forms: geometry.forms,
     landmarks: geometry.landmarks,
@@ -306,7 +306,9 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
     evidence: { evidenceId: makeEvidenceId("cta", cta.href, cta.text), text: cta.text, element: cta.tag, declaredUrl: cta.href, sameOrigin: false, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" },
   }));
 
-  return [...testedResults, ...overLimitResults, ...invalidResults];
+  const combined = [...testedResults, ...overLimitResults, ...invalidResults];
+  const dedupedEvidence = dedupeEvidenceIds(combined.map((r) => r.evidence));
+  return combined.map((r, i) => ({ ...r, evidence: dedupedEvidence[i] }));
 }
 
 async function addAnnotations(page: Page, ctas: ExtractedPage["ctas"]) {
@@ -390,8 +392,8 @@ async function extractSeoEvidence(page: Page, response: Response | null): Promis
     htmlLang: raw.htmlLang,
     viewportMeta: raw.viewportMeta,
     headings: raw.headings,
-    hreflang: raw.hreflang.map((h) => ({ evidenceId: makeEvidenceId("hreflang", h.lang, h.href), ...h })),
-    openGraph: raw.openGraph.map((og) => ({ evidenceId: makeEvidenceId("og", og.property, og.content), ...og })),
+    hreflang: dedupeEvidenceIds(raw.hreflang.map((h) => ({ evidenceId: makeEvidenceId("hreflang", h.lang, h.href), ...h }))),
+    openGraph: dedupeEvidenceIds(raw.openGraph.map((og) => ({ evidenceId: makeEvidenceId("og", og.property, og.content), ...og }))),
     jsonLd,
     links: raw.links.map((link) => ({ text: link.text, href: sanitizeUrl(link.href), sameOrigin: (() => { try { return new URL(link.href).origin === new URL(raw.canonical ?? response?.url() ?? "").origin; } catch { return false; } })() })),
     pageStatus: { initialStatus: redirectChain[0]?.status ?? response?.status() ?? null, finalStatus: response?.status() ?? null, redirectChain },
@@ -433,7 +435,7 @@ function attachConsoleNetworkCapture(page: Page): () => ConsoleNetworkEvidence {
   return () => ({
     consoleErrors: dedupe(consoleErrors).map((e) => ({ evidenceId: makeEvidenceId("console", e.message), ...e })),
     pageErrors: dedupe(pageErrors).map((e) => ({ evidenceId: makeEvidenceId("pageerror", e.message), ...e })),
-    failedRequests: failedRequests.map((r) => ({ evidenceId: makeEvidenceId("network", r.url, r.resourceType), ...r })),
+    failedRequests: dedupeEvidenceIds(failedRequests.map((r) => ({ evidenceId: makeEvidenceId("network", r.url, r.resourceType), ...r }))),
     limits: { maxConsoleErrors: MAX_CONSOLE_ERRORS, maxFailedRequests: MAX_FAILED_REQUESTS, truncated },
   });
 }
