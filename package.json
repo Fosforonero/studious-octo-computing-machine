@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/lib/audit/__tests__/**/*.test.ts",
     "build:worker": "esbuild scripts/audit-worker.ts --bundle --platform=node --format=cjs --outfile=dist/audit-worker.cjs --external:playwright --external:lighthouse --external:chrome-launcher --external:@supabase/supabase-js --external:zod --tsconfig=tsconfig.json",
     "worker": "npm run build:worker && node dist/audit-worker.cjs",
     "worker:once": "npm run build:worker && node dist/audit-worker.cjs --once",

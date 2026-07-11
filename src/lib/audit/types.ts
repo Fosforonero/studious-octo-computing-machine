@@ -1,3 +1,5 @@
+import type { AuditEvidenceV2 } from "@/lib/audit/evidence-types";
+
 export type AuditStatus = "pending" | "running" | "completed" | "failed";
 export type Impact = "critical" | "high" | "medium" | "low";
 export type Effort = "low" | "medium" | "high";
@@ -20,6 +22,7 @@ export interface ExtractedPage {
   cookieBanner: { detected: boolean; dismissed: boolean };
   desktopScreenshotPath?: string;
   mobileScreenshotPath?: string;
+  evidence?: AuditEvidenceV2;
 }
 
 export interface AuditMetrics {
