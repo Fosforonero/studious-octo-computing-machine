@@ -2,61 +2,61 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a versioned, runtime-validated evidence layer under Lensiq's audit report — independent desktop/mobile extraction, typed CTA outcomes, separated cookie-banner detect/dismiss, missing SEO/console/network capture, and lab-vs-field performance evidence — with zero DB migration, zero breakage of `/audits/demo` or existing completed audits, and exactly three narrow report-copy corrections.
+**Goal:** Build a versioned, runtime-validated, unambiguously-citable evidence layer under Lensiq's audit report. The point is not just "collect more data" — every future report conclusion must be traceable to a stable, verifiable, safely-stored piece of evidence. Zero DB migration, zero breakage of `/audits/demo` or existing completed audits, exactly three narrow report-copy corrections.
 
-**Architecture:** An additive, optional `ExtractedPage.evidence?: AuditEvidenceV2` field, assembled by the scanner/worker pipeline, sanitized and Zod-validated before persistence, safe-parsed on read (degrading to `undefined` on any legacy/invalid row rather than throwing). Legacy `cookieBanner`/`ctaJourneys` fields are derived from the v2 evidence by pure mapping functions — one measurement, two shapes, never two measurements.
+**Architecture:** An additive, optional `ExtractedPage.evidence?: AuditEvidenceV2` field. Every repeatable evidence record carries a deterministic `evidenceId` (never an array index). The whole assembled object passes through one centralized deep sanitizer, then a Zod schema whose `superRefine` rules forbid contradictory states (not just wrong shapes), before persisting through the existing `extracted_json` jsonb column. Legacy `cookieBanner`/`ctaJourneys` fields are pure derivations from the v2 evidence — one measurement, two shapes, never two measurements. A committed `node:test` suite (no new framework) covers the contract's core guarantees; a live fixture run is additional, not a substitute.
 
-**Tech Stack:** Next.js 16 App Router / TypeScript, Playwright, Lighthouse, Zod 4, Supabase (service-role admin client only), Docker for all builds/tests (per the user's global Docker-only policy) via `docker-compose`.
+**Tech Stack:** Next.js 16 App Router / TypeScript, Playwright, Lighthouse, Zod 4, Supabase (service-role admin client only), `node:test` (built into Node, already have `tsx` as devDependency), Docker for all builds/tests via `docker-compose`.
 
-**No unit test framework exists in this repo** (`package.json` has no jest/vitest/mocha and no `test` script). Following this repo's established convention (confirmed in the prior Access Control Hardening sprint): each task's steps are "write code → `typecheck` → `lint`," with full live/behavioral verification deferred to Task 16, run against a real controlled fixture through the actual worker pipeline — not a mocked unit test.
+**Execution:** Four checkpoints — **A. Foundations**, **B. Scanner**, **C. Assembly**, **D. Live fixture/verification**. Self-review after each checkpoint (spec coverage, placeholder scan, type consistency — see the writing-plans skill). Open a PR at the end; no merge.
 
 ## Global Constraints
 
-- Never coerce an unmeasured/not-assessed fact to `false`, `0`, or an empty result — use a `value | null` field paired with its own `...Status: EvidenceStatus` sibling field, exactly as specified per-field below.
-- No generic `EvidenceItem<T>` envelope type — every uncertain field uses the concrete `value | null` + `...Status` sibling-field pattern directly.
-- `ExtractedPage.cookieBanner` and `ExtractedPage.ctaJourneys` (the legacy fields) are computed **only** by pure derivation functions from the v2 evidence (`deriveLegacyCookieBanner`, `deriveLegacyCtaJourneys`) — never by a second, independent scan/click pass.
-- Every URL field in the contract passes through `sanitizeUrl` (strips fragment always; replaces a non-empty query string with a fixed `"?[redacted]"` marker by default; truncates an overlong path) and every `reason`/`error`/`message` field through `sanitizeText` (redacts emails, JWTs, `Bearer <token>`, common API-key shapes, UUIDs, generic long hash/token-like sequences; truncates) before persistence — including `TestExecutionRecord.reason` even for fixed internal strings.
-- The full JSON-LD script text is never stored — only parse outcome, declared types, an irreversible `sha256` hash, and (only when genuinely needed for `contentMatch`) a short sanitized excerpt.
-- `AuditEvidenceV2Schema.parse()` runs before persistence in `saveScan()`'s caller; a throw means the whole audit is treated as failed (`failAudit`), never a silent partial write. `AuditEvidenceV2Schema.safeParse()` runs on every read in `getAudit`/`getOwnedAuditFull`; failure (or `evidence` simply absent, as for every pre-sprint row) sets `page.evidence = undefined` and logs a sanitized line (audit id + Zod issue count/paths only, never field values) — it never throws up through a page or API route.
-- No new Supabase migration. `ExtractedPage.evidence` rides through the existing `audit_pages.extracted_json` jsonb column exactly like every other `ExtractedPage` field.
-- Cookie-banner screenshots exist only as in-memory `Buffer`s until uploaded; `screenshotBeforeDismiss`/`screenshotAfterDismiss` are set only after a successful upload; a failed upload leaves the field absent and records `{ id: "cookie-banner-screenshot-upload", status: "failed", reason: <sanitized> }` — never a fabricated URL.
-- `AuditTestId` is a closed union; no free-text test names anywhere in `methodology.tests`.
-- Every redirect hop — page-level and CTA-level, same-origin or not — is re-validated with `assertSafeUrl`/`resolveSafeHostAddress` before the navigation is allowed to proceed.
-- No raw SQL against the database at any point during implementation or verification — all test data via legitimate app functions (`createAudit`, the real worker pipeline) or the Supabase admin JS client (parameterized), never literal SQL text. (No exception this sprint — the prior sprint's one-time exception does not carry over.)
-- Task 16's fixture is a temporary, standalone public Vercel deployment — **not** `localhost` (the existing SSRF guards deliberately block private/loopback targets, so a localhost fixture would never traverse the real pipeline). `noindex, nofollow`, unlinked from anywhere, torn down after verification; its URL is tracked only in a local temp file, never committed.
-- `demoAudit` (`src/lib/audit/demo.ts`) and `/audits/demo` render unchanged — no v2 evidence added to the fixture this sprint. Every new `ExtractedPage`/evidence field is optional so pre-sprint completed audits keep rendering exactly as today.
-- No benchmark or competitor references in code, commits, or docs.
-- Out of scope, confirmed unchanged this sprint: expert prompts (`src/lib/audit/experts/*`), the Executive Reviewer, scoring logic, CrUX integration, pricing copy, the worker's deployment mechanism, auth/checkout/webhook/legal pages, RLS, browser-side Supabase client, PDF/share links, multi-page crawling.
+- Never coerce an unmeasured/not-assessed fact to `false`, `0`, or an empty result — use `value | null` + its own `...Status: EvidenceStatus` sibling field.
+- No generic `EvidenceItem<T>` envelope — concrete `value | null` + `...Status` sibling fields directly on each type.
+- **Every repeatable evidence record carries a deterministic `evidenceId: EvidenceId`** (a stable string derived from the record's own stable content, not a counter or array index): CTA journeys, geometric/tap-target candidates, console errors, network failures, JSON-LD blocks, hreflang/OG entries, screenshot evidence, accessibility observations. Cross-references (CTA ↔ screenshot, a future `Finding.evidenceRefs: EvidenceId[]`) resolve by `evidenceId`, never by position. `Finding` itself (`src/lib/audit/types.ts`) is **not** modified this sprint — only `EvidenceId` is exported now, so a future Finding v2 can adopt `evidenceRefs` without another contract change.
+- `ExtractedPage.cookieBanner`/`ExtractedPage.ctaJourneys` are computed **only** by pure derivation functions from v2 evidence — never a second independent pass.
+- The Zod schema enforces **runtime invariants**, not just shapes, via `superRefine`: `blocking=null` iff `blockingStatus="not-assessed"`; `navigationAttempted=false` requires `skippedReason` and a compatible `outcome`; `external-not-visited` requires `sameOrigin=false` and `navigationAttempted=false`; `navigated`/`redirected` require `navigationAttempted=true` and `finalUrl`; `redirected` requires `redirectCount>=1`; field-performance `status="available"` requires non-null values, `"not-assessed"|"insufficient-data"` require null values; `mobile.ctaJourneys=null` requires a matching `cta-journey-mobile` skip record in `methodology.tests`; timestamps are ISO 8601; HTTP statuses are 100-599; viewport dimensions are positive; lab/field metric numbers are non-negative; `runCount>=1`. An evidence object failing any invariant is logged (sanitized) and degrades to `undefined`, never persisted as if valid.
+- **One centralized `sanitizeEvidenceV2(evidence)` runs on the whole assembled object immediately before `AuditEvidenceV2Schema.parse()` and persistence** — covering URLs/query strings, selectors, CTA text, form `action`/input `name`, OG metadata, JSON-LD excerpts, console/network messages, error messages, and methodology notes/reasons. Per-field `sanitizeUrl`/`sanitizeText` calls at the point of capture remain as defense-in-depth, not as the only line of defense.
+- JSON-LD: hash and excerpt are derived from **redacted** content, never the raw script text directly — the full script is never stored under any circumstance.
+- `AuditEvidenceV2Schema.parse()` before persistence (throw → `failAudit`, no silent partial write); `safeParse()` on every read (failure or absence → `page.evidence = undefined` + a sanitized log line, never a throw up through a route).
+- No new Supabase migration — evidence rides the existing `audit_pages.extracted_json` jsonb column.
+- **`raw_lighthouse_json` (`audit_metrics.raw_lighthouse_json`) is no longer persisted in full** — it is confirmed unused by any reader (grepped repo-wide) and can carry unsanitized URLs/query strings from the Lighthouse run. Replace it with a small, explicitly sanitized diagnostic subset (or `null`), never the entire `lhr` object.
+- Cookie-banner screenshots: captured **only when a banner is actually detected**; size/resolution-capped; `Buffer`s are cleared from in-memory structures immediately after a successful upload; `screenshotBeforeDismiss`/`.After` are set only post-upload; a partial-upload failure keeps whichever refs succeeded and records precisely which viewport/stage failed (never a blanket boolean).
+- A CTA redirecting to a private/unsafe address is **not** a generic `network-error` — it is the typed `blocked-unsafe-redirect` outcome, must not fail the whole audit, and must never persist the actual private address (a fixed generic message only).
+- `AuditTestId` is a closed union; no free-text test names.
+- Every redirect hop — page-level and CTA-level — is re-validated with `assertSafeUrl`/`resolveSafeHostAddress`.
+- No raw SQL at any point, no exception this sprint.
+- Checkpoint D's fixture is a fully isolated, temporary Vercel project (its own real routes/functions producing genuine 302s, not static HTML) — no production env, no secrets, no custom domain, no Git linkage. Torn down completely afterward: project, temp files, audit + its child rows, **and every uploaded Storage object**.
+- Lighthouse `testConditions` (`throttlingMethod`, `cpuThrottling`, `networkProfile`, `locale`, `formFactor`) are read from the actual `lhr.configSettings` at runtime, never hardcoded.
+- `demoAudit`/`/audits/demo` render unchanged. Every new field is optional.
+- Scope unchanged: no new scoring, no expert-prompt changes, no report redesign beyond the three approved copy corrections, no pricing/Stripe/landing changes, no CrUX integration, no RLS/browser-side Supabase client, no benchmark/competitor references.
 
 ---
 
-### Task 1: Evidence Contract types
+## Checkpoint A — Foundations
+
+### Task A1: Evidence types, `EvidenceId`, stable-ID generation
 
 **Files:**
 - Create: `src/lib/audit/evidence-types.ts`
-- Modify: `src/lib/audit/types.ts:6-23` (add optional `evidence` field to `ExtractedPage`)
+- Create: `src/lib/audit/evidence-id.ts`
+- Modify: `src/lib/audit/types.ts` (add optional `evidence` field to `ExtractedPage`)
 
-**Interfaces:**
-- Produces: every type below, imported by all subsequent tasks.
-
-- [ ] **Step 1: Create the evidence types file**
+- [ ] **Step 1: Evidence types**
 
 ```ts
 // src/lib/audit/evidence-types.ts
-
 export type EvidenceStatus = "verified" | "inferred" | "not-assessed";
+export type EvidenceId = string;
 
 export type AuditTestId =
-  | "desktop-dom"
-  | "mobile-dom"
-  | "cta-journey-desktop"
-  | "cta-journey-mobile"
-  | "cookie-banner-desktop"
-  | "cookie-banner-mobile"
+  | "desktop-dom" | "mobile-dom"
+  | "cta-journey-desktop" | "cta-journey-mobile"
+  | "cookie-banner-desktop" | "cookie-banner-mobile"
   | "cookie-banner-screenshot-upload"
   | "seo-extraction"
-  | "console-network-desktop"
-  | "console-network-mobile"
+  | "console-network-desktop" | "console-network-mobile"
   | "lighthouse-lab";
 
 export interface TestExecutionRecord {
@@ -81,25 +81,27 @@ export interface AuditMethodology {
   limitations: string[];
 }
 
-export interface BoundingBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+export interface BoundingBox { x: number; y: number; width: number; height: number; }
 
+// Geometric measurement is "verified"; whether it represents a real problem is always
+// "inferred" — an overlay can be intentional, a small target can satisfy a WCAG 2.5.8
+// exception. `status` here is deliberately always "inferred" for a populated candidate.
 export interface OverlapCandidate {
+  evidenceId: EvidenceId;
   selector: string;
   overlapsWithSelector: string;
   issue: "cutoff" | "overlap";
   boundingBox: BoundingBox;
+  status: EvidenceStatus;
 }
 
 export interface SmallTapTargetCandidate {
+  evidenceId: EvidenceId;
   selector: string;
   boundingBox: BoundingBox;
   widthPx: number;
   heightPx: number;
+  status: EvidenceStatus;
 }
 
 export interface CookieBannerEvidence {
@@ -113,9 +115,10 @@ export interface CookieBannerEvidence {
   screenshotAfterDismiss?: string;
 }
 
-export type CtaOutcome = "navigated" | "redirected" | "http-error" | "network-error" | "external-not-visited" | "skipped-limit" | "skipped-invalid-url";
+export type CtaOutcome = "navigated" | "redirected" | "http-error" | "network-error" | "blocked-unsafe-redirect" | "external-not-visited" | "skipped-limit" | "skipped-invalid-url";
 
 export interface CtaJourneyEvidence {
+  evidenceId: EvidenceId;
   text: string;
   element: string;
   declaredUrl: string;
@@ -148,10 +151,14 @@ export interface BrowserEvidence {
   cookieBanner: CookieBannerEvidence;
 }
 
+export interface ConsoleErrorEvidence { evidenceId: EvidenceId; message: string; timestamp: string; }
+export interface PageErrorEvidence { evidenceId: EvidenceId; message: string; timestamp: string; }
+export interface FailedRequestEvidence { evidenceId: EvidenceId; url: string; resourceType: string; domain: string; status: number | null; message?: string; }
+
 export interface ConsoleNetworkEvidence {
-  consoleErrors: { message: string; timestamp: string }[];
-  pageErrors: { message: string; timestamp: string }[];
-  failedRequests: { url: string; resourceType: string; domain: string; status: number | null; message?: string }[];
+  consoleErrors: ConsoleErrorEvidence[];
+  pageErrors: PageErrorEvidence[];
+  failedRequests: FailedRequestEvidence[];
   limits: { maxConsoleErrors: number; maxFailedRequests: number; truncated: boolean };
 }
 
@@ -162,6 +169,7 @@ export interface ViewportEvidence {
 }
 
 export interface JsonLdEvidence {
+  evidenceId: EvidenceId;
   parsed: boolean;
   types: string[];
   parseError?: string;
@@ -170,6 +178,9 @@ export interface JsonLdEvidence {
   contentMatch: boolean | null;
   contentMatchStatus: EvidenceStatus;
 }
+
+export interface HreflangEvidence { evidenceId: EvidenceId; lang: string; href: string; }
+export interface OpenGraphEvidence { evidenceId: EvidenceId; property: string; content: string; }
 
 export interface SeoEvidence {
   title: string;
@@ -180,8 +191,8 @@ export interface SeoEvidence {
   htmlLang: string | null;
   viewportMeta: string | null;
   headings: { level: number; text: string }[];
-  hreflang: { lang: string; href: string }[];
-  openGraph: { property: string; content: string }[];
+  hreflang: HreflangEvidence[];
+  openGraph: OpenGraphEvidence[];
   jsonLd: JsonLdEvidence[];
   links: { text: string; href: string; sameOrigin: boolean }[];
   pageStatus: { initialStatus: number | null; finalStatus: number | null; redirectChain: { from: string; to: string; status: number }[] };
@@ -210,10 +221,22 @@ export interface PerformanceEvidence {
   };
 }
 
+export interface AccessibilityObservation { evidenceId: EvidenceId; id: string; title: string; impact?: string; }
+
+// Explicitly per-viewport — Lighthouse itself only runs once (desktop), so mobile's
+// automatedChecks MUST read not-assessed, never silently inherit desktop's score.
+// browserObservations, by contrast, genuinely exist for both viewports (Task B1 runs
+// extractEvidence() on both), so they're populated for real on both sides.
 export interface AccessibilityEvidence {
   standard: "WCAG 2.2";
-  automatedChecks: { source: "lighthouse"; score: number; failedAudits: { id: string; title: string; impact?: string }[] };
-  browserObservations: { imagesWithoutAlt: number; formInputsWithoutLabel: number; landmarksPresent: string[] };
+  desktop: {
+    automatedChecks: { source: "lighthouse"; status: "verified"; score: number; failedAudits: AccessibilityObservation[] };
+    browserObservations: { imagesWithoutAlt: number; formInputsWithoutLabel: number; landmarksPresent: string[] };
+  };
+  mobile: {
+    automatedChecks: { source: "lighthouse"; status: "not-assessed"; score: null; failedAudits: [] };
+    browserObservations: { imagesWithoutAlt: number; formInputsWithoutLabel: number; landmarksPresent: string[] };
+  };
   requiresHumanVerification: string[];
 }
 
@@ -228,40 +251,42 @@ export interface AuditEvidenceV2 {
 }
 ```
 
-- [ ] **Step 2: Add the optional `evidence` field to `ExtractedPage`**
-
-In `src/lib/audit/types.ts`, add the import and one new optional field:
+- [ ] **Step 2: Deterministic ID generation**
 
 ```ts
-import type { AuditEvidenceV2 } from "@/lib/audit/evidence-types";
+// src/lib/audit/evidence-id.ts
+import { hashContent } from "@/lib/audit/evidence-sanitize";
+import type { EvidenceId } from "@/lib/audit/evidence-types";
+
+// Deterministic: same category + same stable key parts always produce the same id, so
+// citing "cta:9f3ab21c4e01" remains meaningful even if array order changes between runs
+// or re-renders. Never derived from an array index or a random value.
+export function makeEvidenceId(category: string, ...keyParts: string[]): EvidenceId {
+  return `${category}:${hashContent(keyParts.join("|")).slice(0, 12)}`;
+}
 ```
 
-Add `evidence?: AuditEvidenceV2;` as the last field inside the `ExtractedPage` interface (after `mobileScreenshotPath?: string;`, before the closing brace).
+(Depends on Task A2's `hashContent` — implement this file after A2, or accept the forward reference since both land in the same checkpoint before any typecheck gate.)
 
-- [ ] **Step 3: Typecheck**
+- [ ] **Step 3: Add `evidence` to `ExtractedPage`**
 
-Run: `docker-compose run --rm web npx tsc --noEmit`
-Expected: no errors (the new field is optional; nothing currently reads it).
+In `src/lib/audit/types.ts`: `import type { AuditEvidenceV2 } from "@/lib/audit/evidence-types";` and add `evidence?: AuditEvidenceV2;` as the last field of `ExtractedPage`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Typecheck, commit**
 
 ```bash
-git add src/lib/audit/evidence-types.ts src/lib/audit/types.ts
-git commit -m "feat: add Evidence Contract v2 types"
+docker-compose run --rm web npx tsc --noEmit
+git add src/lib/audit/evidence-types.ts src/lib/audit/evidence-id.ts src/lib/audit/types.ts
+git commit -m "feat: add Evidence Contract v2 types with stable evidenceId"
 ```
 
 ---
 
-### Task 2: Centralized sanitization
+### Task A2: Centralized sanitization, including whole-object `sanitizeEvidenceV2`
 
-**Files:**
-- Create: `src/lib/audit/evidence-sanitize.ts`
+**Files:** Create `src/lib/audit/evidence-sanitize.ts`
 
-**Interfaces:**
-- Consumes: nothing (pure functions, no project imports beyond `node:crypto`).
-- Produces: `sanitizeUrl(raw: string): string`, `sanitizeText(raw: string, maxLength: number): string`, `hashContent(raw: string): string` — used by Tasks 5-13.
-
-- [ ] **Step 1: Write the sanitizer**
+- [ ] **Step 1: Base redaction primitives**
 
 ```ts
 // src/lib/audit/evidence-sanitize.ts
@@ -272,33 +297,33 @@ const JWT_PATTERN = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._-]+/gi;
 const API_KEY_PATTERN = /\b(sk|pk|rk)_[A-Za-z0-9]{10,}\b|\bAIza[A-Za-z0-9_-]{20,}\b/g;
 const UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
+const PRIVATE_IPV4_PATTERN = /\b(?:10|127|192\.168|169\.254|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
 const GENERIC_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 
-function redactContent(input: string): string {
+// Redaction only — no truncation. Used before hashing, where truncating first would
+// weaken the hash's ability to distinguish genuinely different content.
+export function redactSensitivePatterns(input: string): string {
   return input
     .replace(EMAIL_PATTERN, "[redacted-email]")
     .replace(JWT_PATTERN, "[redacted-jwt]")
     .replace(BEARER_PATTERN, "Bearer [redacted]")
     .replace(API_KEY_PATTERN, "[redacted-api-key]")
     .replace(UUID_PATTERN, "[redacted-uuid]")
+    .replace(PRIVATE_IPV4_PATTERN, "[redacted-private-address]")
     .replace(GENERIC_TOKEN_PATTERN, "[redacted-token]");
 }
 
 export function sanitizeUrl(raw: string): string {
   let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return sanitizeText(raw, 300);
-  }
+  try { url = new URL(raw); } catch { return sanitizeText(raw, 300); }
   url.hash = "";
   if (url.search) url.search = "?[redacted]";
   const sanitizedPath = url.pathname.length > 200 ? `${url.pathname.slice(0, 200)}…` : url.pathname;
-  return `${url.origin}${sanitizedPath}${url.search}`;
+  return redactSensitivePatterns(`${url.origin}${sanitizedPath}${url.search}`);
 }
 
 export function sanitizeText(raw: string, maxLength: number): string {
-  const redacted = redactContent(raw);
+  const redacted = redactSensitivePatterns(raw);
   return redacted.length > maxLength ? `${redacted.slice(0, maxLength)}…` : redacted;
 }
 
@@ -307,79 +332,122 @@ export function hashContent(raw: string): string {
 }
 ```
 
-- [ ] **Step 2: Typecheck and lint**
+- [ ] **Step 2: Whole-object `sanitizeEvidenceV2`**
 
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/evidence-sanitize.ts`
-Expected: no errors.
-
-- [ ] **Step 3: Manual verification via a throwaway script**
-
-Create `tmp-sanitize-check.ts` in the project root (not `/tmp` — see the established Docker bind-mount convention):
+Applied to the fully-assembled object, immediately before Zod validation — this is the deep pass; per-field sanitizer calls made during capture (Checkpoint B) remain as defense-in-depth, not the only safeguard.
 
 ```ts
-import { sanitizeUrl, sanitizeText, hashContent } from "./src/lib/audit/evidence-sanitize";
+import type { AuditEvidenceV2 } from "@/lib/audit/evidence-types";
 
-console.log(sanitizeUrl("https://example.com/path?token=abc123&email=x@y.com#section"));
-console.log(sanitizeText("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U failed for user@example.com id 550e8400-e29b-41d4-a716-446655440000", 500));
-console.log(hashContent("<script type=\"application/ld+json\">{}</script>").length);
+const TEXT_FIELD_MAX = 2000;
+
+export function sanitizeEvidenceV2(evidence: AuditEvidenceV2): AuditEvidenceV2 {
+  const sanitizeUrlField = (u: string) => sanitizeUrl(u);
+  const sanitizeTextField = (t: string, max = TEXT_FIELD_MAX) => sanitizeText(t, max);
+
+  const sanitizeBrowser = (browser: AuditEvidenceV2["desktop"]["browser"]) => ({
+    ...browser,
+    ctasVisible: browser.ctasVisible.map((c) => ({ ...c, text: sanitizeTextField(c.text, 300), href: sanitizeUrlField(c.href) })),
+    overlapCandidates: browser.overlapCandidates?.map((c) => ({ ...c, selector: sanitizeTextField(c.selector, 300), overlapsWithSelector: sanitizeTextField(c.overlapsWithSelector, 300) })) ?? null,
+    smallTapTargetCandidates: browser.smallTapTargetCandidates?.map((c) => ({ ...c, selector: sanitizeTextField(c.selector, 300) })) ?? null,
+    forms: browser.forms.map((f) => ({ action: sanitizeUrlField(f.action), inputs: f.inputs.map((i) => ({ ...i, name: sanitizeTextField(i.name, 200) })) })),
+    images: browser.images.map((img) => ({ ...img, src: sanitizeUrlField(img.src) })),
+  });
+
+  const sanitizeConsole = (consoleEvidence: AuditEvidenceV2["desktop"]["console"]) => ({
+    consoleErrors: consoleEvidence.consoleErrors.map((e) => ({ ...e, message: sanitizeTextField(e.message, 500) })),
+    pageErrors: consoleEvidence.pageErrors.map((e) => ({ ...e, message: sanitizeTextField(e.message, 500) })),
+    failedRequests: consoleEvidence.failedRequests.map((r) => ({ ...r, url: sanitizeUrlField(r.url), message: r.message ? sanitizeTextField(r.message, 300) : r.message })),
+    limits: consoleEvidence.limits,
+  });
+
+  const sanitizeCta = (journeys: AuditEvidenceV2["desktop"]["ctaJourneys"]) => journeys?.map((j) => ({
+    ...j,
+    text: sanitizeTextField(j.text, 300),
+    declaredUrl: sanitizeUrlField(j.declaredUrl),
+    finalUrl: j.finalUrl ? sanitizeUrlField(j.finalUrl) : j.finalUrl,
+    error: j.error ? sanitizeTextField(j.error, 300) : j.error,
+    skippedReason: j.skippedReason ? sanitizeTextField(j.skippedReason, 300) : j.skippedReason,
+  })) ?? null;
+
+  return {
+    ...evidence,
+    methodology: {
+      ...evidence.methodology,
+      requestedUrl: sanitizeUrlField(evidence.methodology.requestedUrl),
+      finalUrl: sanitizeUrlField(evidence.methodology.finalUrl),
+      redirects: evidence.methodology.redirects.map((r) => ({ from: sanitizeUrlField(r.from), to: sanitizeUrlField(r.to), status: r.status })),
+      tests: evidence.methodology.tests.map((t) => (t.reason ? { ...t, reason: sanitizeTextField(t.reason, 500) } : t)),
+      limitations: evidence.methodology.limitations.map((l) => sanitizeTextField(l, 300)),
+    },
+    seo: {
+      ...evidence.seo,
+      canonical: evidence.seo.canonical ? sanitizeUrlField(evidence.seo.canonical) : evidence.seo.canonical,
+      hreflang: evidence.seo.hreflang.map((h) => ({ ...h, href: sanitizeUrlField(h.href) })),
+      openGraph: evidence.seo.openGraph.map((og) => ({ ...og, content: sanitizeTextField(og.content, 1000) })),
+      jsonLd: evidence.seo.jsonLd.map((j) => (j.sanitizedExcerpt ? { ...j, sanitizedExcerpt: sanitizeTextField(j.sanitizedExcerpt, 400) } : j)),
+      links: evidence.seo.links.map((l) => ({ ...l, href: sanitizeUrlField(l.href) })),
+      pageStatus: { ...evidence.seo.pageStatus, redirectChain: evidence.seo.pageStatus.redirectChain.map((r) => ({ from: sanitizeUrlField(r.from), to: sanitizeUrlField(r.to), status: r.status })) },
+    },
+    desktop: { browser: sanitizeBrowser(evidence.desktop.browser), console: sanitizeConsole(evidence.desktop.console), ctaJourneys: sanitizeCta(evidence.desktop.ctaJourneys) },
+    mobile: { browser: sanitizeBrowser(evidence.mobile.browser), console: sanitizeConsole(evidence.mobile.console), ctaJourneys: sanitizeCta(evidence.mobile.ctaJourneys) },
+  };
+}
 ```
 
-Run: `docker-compose run --rm web npx tsx /app/tmp-sanitize-check.ts`
-Expected: first line shows `https://example.com/path?[redacted]` (no fragment, no query); second line shows the Bearer token, email, and UUID all replaced with `[redacted-*]` markers; third line prints `64` (sha256 hex length).
-
-Delete the throwaway script: `rm tmp-sanitize-check.ts`
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit
+docker-compose run --rm web npx eslint src/lib/audit/evidence-sanitize.ts
 git add src/lib/audit/evidence-sanitize.ts
-git commit -m "feat: add centralized evidence sanitizer"
+git commit -m "feat: add centralized sanitizer with whole-object sanitizeEvidenceV2"
 ```
 
 ---
 
-### Task 3: Zod schema for runtime validation
+### Task A3: Zod schema with runtime invariants
 
-**Files:**
-- Create: `src/lib/audit/evidence-schema.ts`
+**Files:** Create `src/lib/audit/evidence-schema.ts`
 
-**Interfaces:**
-- Consumes: every type from `src/lib/audit/evidence-types.ts` (Task 1).
-- Produces: `AuditEvidenceV2Schema: z.ZodType<AuditEvidenceV2>` — used by Task 13 (`saveScan` caller) and Task 14 (`db/audits.ts` read path).
-
-- [ ] **Step 1: Write the schema**
+- [ ] **Step 1: Field-level schema (shapes + numeric/format bounds)**
 
 ```ts
 // src/lib/audit/evidence-schema.ts
 import { z } from "zod";
 
 const evidenceStatus = z.enum(["verified", "inferred", "not-assessed"]);
-const boundingBox = z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() });
+const evidenceId = z.string().min(1).max(200);
+const isoTimestamp = z.iso.datetime();
+const httpStatus = z.number().int().min(100).max(599);
+const boundingBox = z.object({ x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() });
 
 const testExecutionRecord = z.object({
   id: z.enum(["desktop-dom", "mobile-dom", "cta-journey-desktop", "cta-journey-mobile", "cookie-banner-desktop", "cookie-banner-mobile", "cookie-banner-screenshot-upload", "seo-extraction", "console-network-desktop", "console-network-mobile", "lighthouse-lab"]),
   status: z.enum(["passed", "failed", "skipped"]),
   reason: z.string().max(500).optional(),
+}).superRefine((val, ctx) => {
+  if (val.status !== "passed" && !val.reason) ctx.addIssue({ code: "custom", message: `reason required when status is ${val.status}` });
 });
 
-const methodology = z.object({
+const methodologyBase = z.object({
   contractVersion: z.literal(2),
-  startedAt: z.string(),
-  finishedAt: z.string(),
+  startedAt: isoTimestamp,
+  finishedAt: isoTimestamp,
   requestedUrl: z.string().max(2000),
   finalUrl: z.string().max(2000),
   pageGoal: z.string().max(500),
   scope: z.literal("single-page"),
-  viewports: z.object({ desktop: z.object({ width: z.number(), height: z.number() }), mobile: z.object({ width: z.number(), height: z.number() }) }),
+  viewports: z.object({ desktop: z.object({ width: z.number().positive(), height: z.number().positive() }), mobile: z.object({ width: z.number().positive(), height: z.number().positive() }) }),
   userAgent: z.object({ desktop: z.string().max(300), mobile: z.string().max(300) }),
   tool: z.object({ lighthouseVersion: z.string().max(50) }),
-  redirects: z.array(z.object({ from: z.string().max(2000), to: z.string().max(2000), status: z.number() })).max(20),
+  redirects: z.array(z.object({ from: z.string().max(2000), to: z.string().max(2000), status: httpStatus })).max(20),
   tests: z.array(testExecutionRecord).max(20),
   limitations: z.array(z.string().max(300)).max(20),
 });
 
-const overlapCandidate = z.object({ selector: z.string().max(300), overlapsWithSelector: z.string().max(300), issue: z.enum(["cutoff", "overlap"]), boundingBox });
-const smallTapTargetCandidate = z.object({ selector: z.string().max(300), boundingBox, widthPx: z.number(), heightPx: z.number() });
+const overlapCandidate = z.object({ evidenceId, selector: z.string().max(300), overlapsWithSelector: z.string().max(300), issue: z.enum(["cutoff", "overlap"]), boundingBox, status: evidenceStatus });
+const smallTapTargetCandidate = z.object({ evidenceId, selector: z.string().max(300), boundingBox, widthPx: z.number().nonnegative(), heightPx: z.number().nonnegative(), status: evidenceStatus });
 
 const cookieBannerEvidence = z.object({
   detected: z.boolean(),
@@ -390,28 +458,64 @@ const cookieBannerEvidence = z.object({
   buttonsFound: z.array(z.string().max(200)).max(10),
   screenshotBeforeDismiss: z.string().max(500).optional(),
   screenshotAfterDismiss: z.string().max(500).optional(),
+}).superRefine((val, ctx) => {
+  if (val.blockingStatus === "not-assessed" && val.blocking !== null) ctx.addIssue({ code: "custom", message: "blocking must be null when blockingStatus is not-assessed" });
+  if (val.blockingStatus !== "not-assessed" && val.blocking === null) ctx.addIssue({ code: "custom", message: "blocking must not be null when blockingStatus is not not-assessed" });
+  if (!val.detected && (val.dismissAttempted || val.dismissed)) ctx.addIssue({ code: "custom", message: "dismissAttempted/dismissed require detected" });
 });
 
+const ctaOutcome = z.enum(["navigated", "redirected", "http-error", "network-error", "blocked-unsafe-redirect", "external-not-visited", "skipped-limit", "skipped-invalid-url"]);
+
 const ctaJourneyEvidence = z.object({
+  evidenceId,
   text: z.string().max(300),
   element: z.string().max(50),
   declaredUrl: z.string().max(2000),
   sameOrigin: z.boolean(),
   navigationAttempted: z.boolean(),
   finalUrl: z.string().max(2000).optional(),
-  redirectCount: z.number().optional(),
-  httpStatus: z.number().optional(),
-  outcome: z.enum(["navigated", "redirected", "http-error", "network-error", "external-not-visited", "skipped-limit", "skipped-invalid-url"]),
+  redirectCount: z.number().int().nonnegative().optional(),
+  httpStatus: httpStatus.optional(),
+  outcome: ctaOutcome,
   screenshotRef: z.string().max(500).optional(),
   error: z.string().max(500).optional(),
   skippedReason: z.string().max(500).optional(),
+}).superRefine((val, ctx) => {
+  const requireSkipped = () => { if (!val.skippedReason) ctx.addIssue({ code: "custom", message: `skippedReason required for outcome ${val.outcome}` }); };
+  switch (val.outcome) {
+    case "external-not-visited":
+      if (val.sameOrigin) ctx.addIssue({ code: "custom", message: "external-not-visited requires sameOrigin=false" });
+      if (val.navigationAttempted) ctx.addIssue({ code: "custom", message: "external-not-visited requires navigationAttempted=false" });
+      requireSkipped();
+      break;
+    case "skipped-limit":
+    case "skipped-invalid-url":
+      if (val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=false` });
+      requireSkipped();
+      break;
+    case "navigated":
+    case "redirected":
+      if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=true` });
+      if (!val.finalUrl) ctx.addIssue({ code: "custom", message: `${val.outcome} requires finalUrl` });
+      if (val.outcome === "redirected" && !(val.redirectCount && val.redirectCount >= 1)) ctx.addIssue({ code: "custom", message: "redirected requires redirectCount >= 1" });
+      break;
+    case "http-error":
+      if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: "http-error requires navigationAttempted=true" });
+      if (val.httpStatus === undefined) ctx.addIssue({ code: "custom", message: "http-error requires httpStatus" });
+      break;
+    case "network-error":
+    case "blocked-unsafe-redirect":
+      if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=true` });
+      if (!val.error) ctx.addIssue({ code: "custom", message: `${val.outcome} requires error` });
+      break;
+  }
 });
 
 const browserEvidence = z.object({
   viewport: z.enum(["desktop", "mobile"]),
   headline: z.string().max(500).nullable(),
-  headingHierarchy: z.array(z.object({ level: z.number(), text: z.string().max(500) })).max(80),
-  aboveFold: z.object({ text: z.string().max(5000), ctaTexts: z.array(z.string().max(300)).max(50), imageCount: z.number() }),
+  headingHierarchy: z.array(z.object({ level: z.number().int().min(1).max(6), text: z.string().max(500) })).max(80),
+  aboveFold: z.object({ text: z.string().max(5000), ctaTexts: z.array(z.string().max(300)).max(50), imageCount: z.number().nonnegative() }),
   ctasVisible: z.array(z.object({ text: z.string().max(300), href: z.string().max(2000), tag: z.string().max(20), position: z.enum(["above-fold", "below-fold"]) })).max(50),
   navPresent: z.boolean(),
   hasHorizontalOverflow: z.boolean().nullable(),
@@ -426,10 +530,10 @@ const browserEvidence = z.object({
 });
 
 const consoleNetworkEvidence = z.object({
-  consoleErrors: z.array(z.object({ message: z.string().max(500), timestamp: z.string() })).max(20),
-  pageErrors: z.array(z.object({ message: z.string().max(500), timestamp: z.string() })).max(20),
-  failedRequests: z.array(z.object({ url: z.string().max(500), resourceType: z.string().max(50), domain: z.string().max(300), status: z.number().nullable(), message: z.string().max(500).optional() })).max(20),
-  limits: z.object({ maxConsoleErrors: z.number(), maxFailedRequests: z.number(), truncated: z.boolean() }),
+  consoleErrors: z.array(z.object({ evidenceId, message: z.string().max(500), timestamp: isoTimestamp })).max(20),
+  pageErrors: z.array(z.object({ evidenceId, message: z.string().max(500), timestamp: isoTimestamp })).max(20),
+  failedRequests: z.array(z.object({ evidenceId, url: z.string().max(500), resourceType: z.string().max(50), domain: z.string().max(300), status: httpStatus.nullable(), message: z.string().max(500).optional() })).max(20),
+  limits: z.object({ maxConsoleErrors: z.number().int().positive(), maxFailedRequests: z.number().int().positive(), truncated: z.boolean() }),
 });
 
 // Capped at 50, matching ExtractedPage.ctas' own extraction cap — this records every
@@ -438,6 +542,7 @@ const consoleNetworkEvidence = z.object({
 const viewportEvidence = z.object({ browser: browserEvidence, console: consoleNetworkEvidence, ctaJourneys: z.array(ctaJourneyEvidence).max(50).nullable() });
 
 const jsonLdEvidence = z.object({
+  evidenceId,
   parsed: z.boolean(),
   types: z.array(z.string().max(100)).max(20),
   parseError: z.string().max(300).optional(),
@@ -445,6 +550,8 @@ const jsonLdEvidence = z.object({
   sanitizedExcerpt: z.string().max(500).optional(),
   contentMatch: z.boolean().nullable(),
   contentMatchStatus: evidenceStatus,
+}).superRefine((val, ctx) => {
+  if (val.contentMatchStatus === "not-assessed" && val.contentMatch !== null) ctx.addIssue({ code: "custom", message: "contentMatch must be null when not-assessed" });
 });
 
 const seoEvidence = z.object({
@@ -455,24 +562,31 @@ const seoEvidence = z.object({
   xRobotsTag: z.string().max(300).nullable(),
   htmlLang: z.string().max(50).nullable(),
   viewportMeta: z.string().max(300).nullable(),
-  headings: z.array(z.object({ level: z.number(), text: z.string().max(500) })).max(80),
-  hreflang: z.array(z.object({ lang: z.string().max(50), href: z.string().max(2000) })).max(50),
-  openGraph: z.array(z.object({ property: z.string().max(100), content: z.string().max(1000) })).max(30),
+  headings: z.array(z.object({ level: z.number().int().min(1).max(6), text: z.string().max(500) })).max(80),
+  hreflang: z.array(z.object({ evidenceId, lang: z.string().max(50), href: z.string().max(2000) })).max(50),
+  openGraph: z.array(z.object({ evidenceId, property: z.string().max(100), content: z.string().max(1000) })).max(30),
   jsonLd: z.array(jsonLdEvidence).max(10),
   links: z.array(z.object({ text: z.string().max(300), href: z.string().max(2000), sameOrigin: z.boolean() })).max(150),
-  pageStatus: z.object({ initialStatus: z.number().nullable(), finalStatus: z.number().nullable(), redirectChain: z.array(z.object({ from: z.string().max(2000), to: z.string().max(2000), status: z.number() })).max(20) }),
+  pageStatus: z.object({ initialStatus: httpStatus.nullable(), finalStatus: httpStatus.nullable(), redirectChain: z.array(z.object({ from: z.string().max(2000), to: z.string().max(2000), status: httpStatus })).max(20) }),
 });
 
 const performanceEvidence = z.object({
-  lab: z.object({ lcp: z.number().nullable(), cls: z.number().nullable(), tbt: z.number().nullable(), ttfb: z.number().nullable(), source: z.literal("lighthouse"), lighthouseVersion: z.string().max(50) }),
+  lab: z.object({ lcp: z.number().nonnegative().nullable(), cls: z.number().nonnegative().nullable(), tbt: z.number().nonnegative().nullable(), ttfb: z.number().nonnegative().nullable(), source: z.literal("lighthouse"), lighthouseVersion: z.string().max(50) }),
   field: z.object({
     source: z.enum(["not-integrated", "crux"]),
     status: z.enum(["not-assessed", "insufficient-data", "available"]),
     percentile: z.literal(75).nullable(),
-    periodDays: z.number().nullable(),
-    lcp: z.number().nullable(),
-    cls: z.number().nullable(),
-    inp: z.number().nullable(),
+    periodDays: z.number().int().nonnegative().nullable(),
+    lcp: z.number().nonnegative().nullable(),
+    cls: z.number().nonnegative().nullable(),
+    inp: z.number().nonnegative().nullable(),
+  }).superRefine((val, ctx) => {
+    if (val.status === "available") {
+      if (val.lcp === null || val.cls === null || val.inp === null) ctx.addIssue({ code: "custom", message: "available field metrics require non-null lcp/cls/inp" });
+      if (val.percentile === null || val.periodDays === null) ctx.addIssue({ code: "custom", message: "available field metrics require percentile/periodDays" });
+    } else {
+      if (val.lcp !== null || val.cls !== null || val.inp !== null) ctx.addIssue({ code: "custom", message: `${val.status} requires null lcp/cls/inp` });
+    }
   }),
   testConditions: z.object({
     formFactor: z.enum(["desktop", "mobile"]),
@@ -481,79 +595,62 @@ const performanceEvidence = z.object({
     networkProfile: z.string().max(100).nullable(),
     locale: z.string().max(20),
     lighthouseVersion: z.string().max(50),
-    runCount: z.number(),
+    runCount: z.number().int().min(1),
     limitations: z.array(z.string().max(300)).max(10),
   }),
 });
 
+const accessibilityObservation = z.object({ evidenceId, id: z.string().max(100), title: z.string().max(300), impact: z.string().max(50).optional() });
+
 const accessibilityEvidence = z.object({
   standard: z.literal("WCAG 2.2"),
-  automatedChecks: z.object({ source: z.literal("lighthouse"), score: z.number(), failedAudits: z.array(z.object({ id: z.string().max(100), title: z.string().max(300), impact: z.string().max(50).optional() })).max(30) }),
-  browserObservations: z.object({ imagesWithoutAlt: z.number(), formInputsWithoutLabel: z.number(), landmarksPresent: z.array(z.string().max(50)).max(10) }),
+  desktop: z.object({
+    automatedChecks: z.object({ source: z.literal("lighthouse"), status: z.literal("verified"), score: z.number().min(0).max(100), failedAudits: z.array(accessibilityObservation).max(30) }),
+    browserObservations: z.object({ imagesWithoutAlt: z.number().nonnegative(), formInputsWithoutLabel: z.number().nonnegative(), landmarksPresent: z.array(z.string().max(50)).max(10) }),
+  }),
+  mobile: z.object({
+    automatedChecks: z.object({ source: z.literal("lighthouse"), status: z.literal("not-assessed"), score: z.null(), failedAudits: z.array(accessibilityObservation).max(0) }),
+    browserObservations: z.object({ imagesWithoutAlt: z.number().nonnegative(), formInputsWithoutLabel: z.number().nonnegative(), landmarksPresent: z.array(z.string().max(50)).max(10) }),
+  }),
   requiresHumanVerification: z.array(z.string().max(200)).max(20),
 });
+```
 
+- [ ] **Step 2: Top-level schema with cross-object invariant**
+
+```ts
 export const AuditEvidenceV2Schema = z.object({
   contractVersion: z.literal(2),
-  methodology,
+  methodology: methodologyBase,
   seo: seoEvidence,
   desktop: viewportEvidence,
   mobile: viewportEvidence,
   performance: performanceEvidence,
   accessibility: accessibilityEvidence,
+}).superRefine((val, ctx) => {
+  if (val.mobile.ctaJourneys === null) {
+    const hasSkipRecord = val.methodology.tests.some((t) => t.id === "cta-journey-mobile" && t.status === "skipped" && t.reason);
+    if (!hasSkipRecord) ctx.addIssue({ code: "custom", message: "mobile.ctaJourneys=null requires a cta-journey-mobile skipped test record with a reason" });
+  }
 });
 ```
 
-- [ ] **Step 2: Typecheck**
+- [ ] **Step 3: Typecheck**
 
-Run: `docker-compose run --rm web npx tsc --noEmit`
-Expected: no errors. (This also structurally confirms the schema's inferred type is assignable where `AuditEvidenceV2` is expected — a mismatch here would be a compile error at the usage sites added in later tasks, so full cross-checking happens then; for now, this task only needs the file itself to compile.)
-
-- [ ] **Step 3: Manual verification via a throwaway script**
-
-Create `tmp-schema-check.ts` in the project root:
-
-```ts
-import { AuditEvidenceV2Schema } from "./src/lib/audit/evidence-schema";
-
-const valid = {
-  contractVersion: 2, methodology: { contractVersion: 2, startedAt: "2026-07-11T00:00:00.000Z", finishedAt: "2026-07-11T00:01:00.000Z", requestedUrl: "https://example.com", finalUrl: "https://example.com/", pageGoal: "signups", scope: "single-page", viewports: { desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 } }, userAgent: { desktop: "d", mobile: "m" }, tool: { lighthouseVersion: "12.8.2" }, redirects: [], tests: [{ id: "desktop-dom", status: "passed" }], limitations: [] },
-  seo: { title: "t", metaDescription: null, canonical: null, robotsMeta: null, xRobotsTag: null, htmlLang: null, viewportMeta: null, headings: [], hreflang: [], openGraph: [], jsonLd: [], links: [], pageStatus: { initialStatus: 200, finalStatus: 200, redirectChain: [] } },
-  desktop: { browser: { viewport: "desktop", headline: null, headingHierarchy: [], aboveFold: { text: "", ctaTexts: [], imageCount: 0 }, ctasVisible: [], navPresent: false, hasHorizontalOverflow: null, overlapCandidates: null, overlapCandidatesStatus: "not-assessed", smallTapTargetCandidates: null, smallTapTargetCandidatesStatus: "not-assessed", forms: [], landmarks: { hasNav: false, hasFooter: false, hasMain: false }, images: [], cookieBanner: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } }, console: { consoleErrors: [], pageErrors: [], failedRequests: [], limits: { maxConsoleErrors: 20, maxFailedRequests: 20, truncated: false } }, ctaJourneys: [] },
-  mobile: { browser: { viewport: "mobile", headline: null, headingHierarchy: [], aboveFold: { text: "", ctaTexts: [], imageCount: 0 }, ctasVisible: [], navPresent: false, hasHorizontalOverflow: null, overlapCandidates: null, overlapCandidatesStatus: "not-assessed", smallTapTargetCandidates: null, smallTapTargetCandidatesStatus: "not-assessed", forms: [], landmarks: { hasNav: false, hasFooter: false, hasMain: false }, images: [], cookieBanner: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } }, console: { consoleErrors: [], pageErrors: [], failedRequests: [], limits: { maxConsoleErrors: 20, maxFailedRequests: 20, truncated: false } }, ctaJourneys: null },
-  performance: { lab: { lcp: null, cls: null, tbt: null, ttfb: null, source: "lighthouse", lighthouseVersion: "12.8.2" }, field: { source: "not-integrated", status: "not-assessed", percentile: null, periodDays: null, lcp: null, cls: null, inp: null }, testConditions: { formFactor: "desktop", throttlingMethod: null, cpuThrottling: null, networkProfile: null, locale: "en-US", lighthouseVersion: "12.8.2", runCount: 1, limitations: ["single lab run"] } },
-  accessibility: { standard: "WCAG 2.2", automatedChecks: { source: "lighthouse", score: 90, failedAudits: [] }, browserObservations: { imagesWithoutAlt: 0, formInputsWithoutLabel: 0, landmarksPresent: [] }, requiresHumanVerification: ["keyboard trap testing"] },
-};
-
-console.log("valid parse:", AuditEvidenceV2Schema.safeParse(valid).success);
-console.log("invalid parse (missing field):", AuditEvidenceV2Schema.safeParse({ ...valid, seo: undefined }).success);
-console.log("invalid parse (blocking as string, not bool|null):", AuditEvidenceV2Schema.safeParse({ ...valid, desktop: { ...valid.desktop, browser: { ...valid.desktop.browser, cookieBanner: { ...valid.desktop.browser.cookieBanner, blocking: "yes" } } } }).success);
-```
-
-Run: `docker-compose run --rm web npx tsx /app/tmp-schema-check.ts`
-Expected: `valid parse: true`, both invalid cases `false`.
-
-Delete the throwaway script: `rm tmp-schema-check.ts`
+`docker-compose run --rm web npx tsc --noEmit`. The full invariant behavior is exercised by Task A5's committed test, not a throwaway script — writing the fixtures once, as real committed tests, replaces the earlier "manual verification script + delete it" pattern for exactly the reason Task A5 exists.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/lib/audit/evidence-schema.ts
-git commit -m "feat: add Zod runtime schema for Evidence Contract v2"
+git commit -m "feat: add Zod schema enforcing Evidence Contract v2 invariants"
 ```
 
 ---
 
-### Task 4: Legacy derivation functions
+### Task A4: Legacy derivation functions
 
-**Files:**
-- Create: `src/lib/audit/evidence-legacy.ts`
-
-**Interfaces:**
-- Consumes: `CookieBannerEvidence`, `CtaJourneyEvidence` (Task 1).
-- Produces: `deriveLegacyCookieBanner`, `deriveLegacyCtaJourneys` — used by Task 13.
-
-- [ ] **Step 1: Write the derivation functions**
+**Files:** Create `src/lib/audit/evidence-legacy.ts`
 
 ```ts
 // src/lib/audit/evidence-legacy.ts
@@ -576,66 +673,237 @@ export function deriveLegacyCtaJourneys(evidence: CtaJourneyEvidence[]): Extract
 
 function legacyOutcomeText(journey: CtaJourneyEvidence): string {
   switch (journey.outcome) {
-    case "navigated":
-      return `Loaded: ${journey.finalUrl ?? journey.declaredUrl}`;
-    case "redirected":
-      return `Loaded after redirect: ${journey.finalUrl ?? journey.declaredUrl}`;
-    case "http-error":
-      return `HTTP ${journey.httpStatus ?? "error"}`;
-    case "network-error":
-      return journey.error ?? "Could not load";
-    case "external-not-visited":
-      return "External destination detected";
-    case "skipped-limit":
-      return "Not tested — audit is capped at the first 5 conversion paths";
-    case "skipped-invalid-url":
-      return "Not tested — invalid or unsupported URL";
+    case "navigated": return `Loaded: ${journey.finalUrl ?? journey.declaredUrl}`;
+    case "redirected": return `Loaded after redirect: ${journey.finalUrl ?? journey.declaredUrl}`;
+    case "http-error": return `HTTP ${journey.httpStatus ?? "error"}`;
+    case "network-error": return journey.error ?? "Could not load";
+    case "blocked-unsafe-redirect": return "Blocked: unsafe redirect destination";
+    case "external-not-visited": return "External destination detected";
+    case "skipped-limit": return "Not tested — audit is capped at the first 5 conversion paths";
+    case "skipped-invalid-url": return "Not tested — invalid or unsupported URL";
   }
 }
 ```
 
-- [ ] **Step 2: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/evidence-legacy.ts`
-Expected: no errors.
-
-- [ ] **Step 3: Commit**
+- [ ] Typecheck, lint, commit:
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/evidence-legacy.ts
 git add src/lib/audit/evidence-legacy.ts
 git commit -m "feat: derive legacy cookieBanner/ctaJourneys fields from v2 evidence"
 ```
 
 ---
 
-### Task 5: Browser scanner — per-viewport `extract()` and geometry candidates
+### Task A5: Committed verification test (`node:test`)
 
 **Files:**
-- Modify: `src/lib/audit/browser-scanner.ts`
+- Create: `src/lib/audit/__tests__/evidence.test.ts`
+- Modify: `package.json` (add a `test` script — no new dependency; `node:test` is built into Node, run through the already-present `tsx` loader)
 
-**Interfaces:**
-- Consumes: `BrowserEvidence`, `OverlapCandidate`, `SmallTapTargetCandidate` (Task 1).
-- Produces: a new `extractEvidence(page: Page, viewport: "desktop" | "mobile"): Promise<BrowserEvidence>` function, called once per viewport by `scanHomepage()`. The existing `extract()` (legacy `ExtractedPage` shape) stays desktop-only and unchanged in this task — Task 6/7 will feed it from the new evidence rather than duplicating logic.
+- [ ] **Step 1: Add the npm script**
 
-- [ ] **Step 1: Add `extractEvidence()` to `browser-scanner.ts`**
+```json
+"test": "node --import tsx --test src/lib/audit/__tests__/**/*.test.ts"
+```
 
-Insert after the existing `extract()` function (currently ending at line 85):
+- [ ] **Step 2: Write the test file**
 
 ```ts
+// src/lib/audit/__tests__/evidence.test.ts
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { sanitizeUrl, sanitizeText, sanitizeEvidenceV2, hashContent } from "@/lib/audit/evidence-sanitize";
+import { makeEvidenceId } from "@/lib/audit/evidence-id";
+import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
+import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
+import type { AuditEvidenceV2, CtaJourneyEvidence } from "@/lib/audit/evidence-types";
+
+function validEvidence(): AuditEvidenceV2 {
+  // A minimal but fully-valid fixture — every test below clones and mutates this.
+  return {
+    contractVersion: 2,
+    methodology: { contractVersion: 2, startedAt: "2026-07-11T00:00:00.000Z", finishedAt: "2026-07-11T00:01:00.000Z", requestedUrl: "https://example.com", finalUrl: "https://example.com/", pageGoal: "signups", scope: "single-page", viewports: { desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 } }, userAgent: { desktop: "d", mobile: "m" }, tool: { lighthouseVersion: "12.8.2" }, redirects: [], tests: [{ id: "desktop-dom", status: "passed" }, { id: "cta-journey-mobile", status: "skipped", reason: "single-page audit tests conversion paths once, on desktop" }], limitations: [] },
+    seo: { title: "t", metaDescription: null, canonical: null, robotsMeta: null, xRobotsTag: null, htmlLang: null, viewportMeta: null, headings: [], hreflang: [], openGraph: [], jsonLd: [], links: [], pageStatus: { initialStatus: 200, finalStatus: 200, redirectChain: [] } },
+    desktop: { browser: { viewport: "desktop", headline: null, headingHierarchy: [], aboveFold: { text: "", ctaTexts: [], imageCount: 0 }, ctasVisible: [], navPresent: false, hasHorizontalOverflow: null, overlapCandidates: null, overlapCandidatesStatus: "not-assessed", smallTapTargetCandidates: null, smallTapTargetCandidatesStatus: "not-assessed", forms: [], landmarks: { hasNav: false, hasFooter: false, hasMain: false }, images: [], cookieBanner: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } }, console: { consoleErrors: [], pageErrors: [], failedRequests: [], limits: { maxConsoleErrors: 20, maxFailedRequests: 20, truncated: false } }, ctaJourneys: [] },
+    mobile: { browser: { viewport: "mobile", headline: null, headingHierarchy: [], aboveFold: { text: "", ctaTexts: [], imageCount: 0 }, ctasVisible: [], navPresent: false, hasHorizontalOverflow: null, overlapCandidates: null, overlapCandidatesStatus: "not-assessed", smallTapTargetCandidates: null, smallTapTargetCandidatesStatus: "not-assessed", forms: [], landmarks: { hasNav: false, hasFooter: false, hasMain: false }, images: [], cookieBanner: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } }, console: { consoleErrors: [], pageErrors: [], failedRequests: [], limits: { maxConsoleErrors: 20, maxFailedRequests: 20, truncated: false } }, ctaJourneys: null },
+    performance: { lab: { lcp: null, cls: null, tbt: null, ttfb: null, source: "lighthouse", lighthouseVersion: "12.8.2" }, field: { source: "not-integrated", status: "not-assessed", percentile: null, periodDays: null, lcp: null, cls: null, inp: null }, testConditions: { formFactor: "desktop", throttlingMethod: null, cpuThrottling: null, networkProfile: null, locale: "en-US", lighthouseVersion: "12.8.2", runCount: 1, limitations: ["single lab run"] } },
+    accessibility: { standard: "WCAG 2.2", desktop: { automatedChecks: { source: "lighthouse", status: "verified", score: 90, failedAudits: [] }, browserObservations: { imagesWithoutAlt: 0, formInputsWithoutLabel: 0, landmarksPresent: [] } }, mobile: { automatedChecks: { source: "lighthouse", status: "not-assessed", score: null, failedAudits: [] }, browserObservations: { imagesWithoutAlt: 0, formInputsWithoutLabel: 0, landmarksPresent: [] } }, requiresHumanVerification: ["keyboard trap testing"] },
+  };
+}
+
+test("sanitizeUrl strips fragment and redacts query string", () => {
+  assert.equal(sanitizeUrl("https://example.com/path?token=abc123#section"), "https://example.com/path?[redacted]");
+});
+
+test("sanitizeText redacts email, JWT, bearer token, UUID, private IP", () => {
+  const out = sanitizeText("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U user@example.com 550e8400-e29b-41d4-a716-446655440000 10.0.0.5", 1000);
+  assert.match(out, /\[redacted-jwt\]/);
+  assert.match(out, /\[redacted-email\]/);
+  assert.match(out, /\[redacted-uuid\]/);
+  assert.match(out, /\[redacted-private-address\]/);
+  assert.doesNotMatch(out, /10\.0\.0\.5/);
+});
+
+test("sanitizeEvidenceV2 redacts nested URL/text fields without changing structure", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.ctasVisible.push({ text: "click me", href: "https://example.com/x?email=user@example.com", tag: "a", position: "above-fold" });
+  const sanitized = sanitizeEvidenceV2(evidence);
+  assert.equal(sanitized.desktop.browser.ctasVisible.length, 1);
+  assert.doesNotMatch(sanitized.desktop.browser.ctasVisible[0].href, /user@example\.com/);
+});
+
+test("makeEvidenceId is deterministic and distinguishes different content", () => {
+  const a1 = makeEvidenceId("cta", "https://x.com/a", "Start free");
+  const a2 = makeEvidenceId("cta", "https://x.com/a", "Start free");
+  const b = makeEvidenceId("cta", "https://x.com/b", "Start free");
+  assert.equal(a1, a2);
+  assert.notEqual(a1, b);
+});
+
+test("evidenceIds are unique across a realistic evidence object", () => {
+  const evidence = validEvidence();
+  const ids = [
+    makeEvidenceId("cta", "https://x.com/a", "A"),
+    makeEvidenceId("cta", "https://x.com/b", "B"),
+    makeEvidenceId("console", "TypeError: x is not defined"),
+    makeEvidenceId("network", "https://x.com/broken.png", "image"),
+  ];
+  assert.equal(new Set(ids).size, ids.length);
+  void evidence;
+});
+
+test("valid evidence parses successfully", () => {
+  assert.equal(AuditEvidenceV2Schema.safeParse(validEvidence()).success, true);
+});
+
+test("blocking=true with blockingStatus=not-assessed is rejected", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.cookieBanner = { ...evidence.desktop.browser.cookieBanner, detected: true, blocking: true, blockingStatus: "not-assessed" };
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("navigated outcome without finalUrl is rejected", () => {
+  const evidence = validEvidence();
+  const journey: CtaJourneyEvidence = { evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, outcome: "navigated" };
+  evidence.desktop.ctaJourneys = [journey];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("redirected outcome with redirectCount=0 is rejected", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [{ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "redirected" }];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("blocked-unsafe-redirect without error field is rejected", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [{ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, outcome: "blocked-unsafe-redirect" }];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("blocked-unsafe-redirect with a sanitized error passes and never carries a raw private IP", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [{ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, outcome: "blocked-unsafe-redirect", error: "Blocked: navigation to a private/unsafe address was prevented" }];
+  const result = AuditEvidenceV2Schema.safeParse(evidence);
+  assert.equal(result.success, true);
+  if (result.success) assert.doesNotMatch(JSON.stringify(result.data), /\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+});
+
+test("field performance status=available without values is rejected", () => {
+  const evidence = validEvidence();
+  evidence.performance.field = { source: "crux", status: "available", percentile: 75, periodDays: 28, lcp: null, cls: null, inp: null };
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("mobile.ctaJourneys=null without a cta-journey-mobile skip record is rejected", () => {
+  const evidence = validEvidence();
+  evidence.methodology.tests = evidence.methodology.tests.filter((t) => t.id !== "cta-journey-mobile");
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("invalid evidence is ignored, not thrown, when parsed with safeParse (mirrors db/audits.ts read path)", () => {
+  const evidence = validEvidence();
+  (evidence as unknown as { performance: unknown }).performance = "not an object";
+  const result = AuditEvidenceV2Schema.safeParse(evidence);
+  assert.equal(result.success, false);
+  assert.ok(result.error.issues.length > 0);
+});
+
+test("deriveLegacyCookieBanner mirrors detected/dismissed exactly", () => {
+  const legacy = deriveLegacyCookieBanner({ detected: true, dismissAttempted: true, dismissed: false, blocking: true, blockingStatus: "verified", buttonsFound: ["Accept"] });
+  assert.deepEqual(legacy, { detected: true, dismissed: false });
+});
+
+test("deriveLegacyCtaJourneys maps CTA<->screenshot by evidenceId-scoped screenshotRef, not array position", () => {
+  const journeys: CtaJourneyEvidence[] = [
+    { evidenceId: "cta:aaa", text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/a.jpg" },
+    { evidenceId: "cta:bbb", text: "B", element: "a", declaredUrl: "https://x.com/b", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/b", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/b.jpg" },
+  ];
+  const legacy = deriveLegacyCtaJourneys(journeys);
+  assert.equal(legacy[0].screenshotPath, "https://storage/a.jpg");
+  assert.equal(legacy[1].screenshotPath, "https://storage/b.jpg");
+});
+
+test("no Buffer or absolute local filesystem path survives into a schema-valid evidence object", () => {
+  const evidence = validEvidence();
+  const serialized = JSON.stringify(evidence);
+  assert.doesNotMatch(serialized, /"type":"Buffer"/);
+  assert.doesNotMatch(serialized, /\/Volumes\/|\/private\/tmp\/|\/Users\//);
+});
+
+test("hashContent is deterministic", () => {
+  assert.equal(hashContent("<script>{}</script>"), hashContent("<script>{}</script>"));
+});
+```
+
+- [ ] **Step 3: Run it**
+
+```bash
+docker-compose run --rm web npm test
+```
+Expected: all tests pass. This is Checkpoint A's gate — do not proceed to Checkpoint B until every test above is green.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add package.json src/lib/audit/__tests__/evidence.test.ts
+git commit -m "test: add committed node:test suite for Evidence Contract v2 invariants"
+```
+
+- [ ] **Checkpoint A self-review:** re-read Tasks A1-A5 against Global Constraints — every repeatable record has `evidenceId`; every uncertain field has a `null`/`...Status` pair; the schema's `superRefine`s cover every invariant listed; the committed test exercises sanitization, ID determinism/uniqueness, every invariant, legacy derivation, invalid-evidence handling, CTA↔screenshot-by-id mapping, and no-Buffer-serialization. Fix anything missing before starting Checkpoint B.
+
+---
+
+## Checkpoint B — Scanner
+
+### Task B1: Per-viewport `extract()` and geometry candidates, with IDs, time/size limits, honest "inferred" status
+
+**Files:** Modify `src/lib/audit/browser-scanner.ts`
+
+- [ ] **Step 1: `extractEvidence()`**
+
+Add after the existing `extract()`. Bounded by both element-count caps (already present) and a wall-clock budget inside the page context (`performance.now()`), so a pathological page can't hang the scan:
+
+```ts
+import { makeEvidenceId } from "@/lib/audit/evidence-id";
+
 async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Promise<import("@/lib/audit/evidence-types").BrowserEvidence> {
-  const geometry = await page.evaluate(() => {
+  const GEOMETRY_TIME_BUDGET_MS = 2000;
+  const geometry = await page.evaluate((budgetMs: number) => {
+    const start = performance.now();
+    const timeLeft = () => performance.now() - start < budgetMs;
     const rects = [...document.querySelectorAll("body *")].filter((el) => {
       const r = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
       return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     });
     const hasHorizontalOverflow = document.documentElement.scrollWidth > document.documentElement.clientWidth + 1;
+    const describeSelector = (el: Element) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${el.className && typeof el.className === "string" ? `.${el.className.trim().split(/\s+/).slice(0, 2).join(".")}` : ""}`;
 
     const overlapCandidates: { selector: string; overlapsWithSelector: string; issue: "cutoff" | "overlap"; boundingBox: { x: number; y: number; width: number; height: number } }[] = [];
-    const describeSelector = (el: Element) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${el.className && typeof el.className === "string" ? `.${el.className.trim().split(/\s+/).slice(0, 2).join(".")}` : ""}`;
-    const sample = rects.slice(0, 400);
-    for (let i = 0; i < sample.length; i += 1) {
-      const a = sample[i];
+    for (const a of rects.slice(0, 400)) {
+      if (!timeLeft() || overlapCandidates.length >= 30) break;
       const aRect = a.getBoundingClientRect();
       const parent = a.parentElement;
       if (parent) {
@@ -644,17 +912,14 @@ async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Prom
           overlapCandidates.push({ selector: describeSelector(a), overlapsWithSelector: describeSelector(parent), issue: "cutoff", boundingBox: { x: aRect.x, y: aRect.y, width: aRect.width, height: aRect.height } });
         }
       }
-      if (overlapCandidates.length >= 30) break;
     }
 
     const smallTapTargetCandidates: { selector: string; boundingBox: { x: number; y: number; width: number; height: number }; widthPx: number; heightPx: number }[] = [];
     const interactive = rects.filter((el) => el.tagName === "A" || el.tagName === "BUTTON" || el.getAttribute("role") === "button" || el.tagName === "INPUT");
     for (const el of interactive.slice(0, 200)) {
+      if (!timeLeft() || smallTapTargetCandidates.length >= 30) break;
       const r = el.getBoundingClientRect();
-      if (r.width < 24 || r.height < 24) {
-        smallTapTargetCandidates.push({ selector: describeSelector(el), boundingBox: { x: r.x, y: r.y, width: r.width, height: r.height }, widthPx: Math.round(r.width), heightPx: Math.round(r.height) });
-      }
-      if (smallTapTargetCandidates.length >= 30) break;
+      if (r.width < 24 || r.height < 24) smallTapTargetCandidates.push({ selector: describeSelector(el), boundingBox: { x: r.x, y: r.y, width: r.width, height: r.height }, widthPx: Math.round(r.width), heightPx: Math.round(r.height) });
     }
 
     const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
@@ -667,42 +932,27 @@ async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Prom
     const aboveFoldText = clean(foldNodes.map((n) => n.textContent).join(" ")).slice(0, 5000);
     const aboveFoldCtas = ctasVisible.filter((c) => c.position === "above-fold").map((c) => c.text);
     const imageCount = [...document.images].filter((img) => img.getBoundingClientRect().top < window.innerHeight).length;
-    const forms = [...document.forms].map((form) => ({
-      action: form.action,
-      inputs: [...form.elements].map((field) => {
-        const input = field as HTMLInputElement;
-        const hasLabel = Boolean(input.labels?.length) || Boolean(input.getAttribute("aria-label")) || Boolean(input.getAttribute("aria-labelledby"));
-        return { name: input.name || "", type: input.type || input.tagName.toLowerCase(), hasLabel };
-      }).slice(0, 30),
-    })).slice(0, 20);
+    const forms = [...document.forms].map((form) => ({ action: form.action, inputs: [...form.elements].map((field) => { const input = field as HTMLInputElement; const hasLabel = Boolean(input.labels?.length) || Boolean(input.getAttribute("aria-label")) || Boolean(input.getAttribute("aria-labelledby")); return { name: input.name || "", type: input.type || input.tagName.toLowerCase(), hasLabel }; }).slice(0, 30) })).slice(0, 20);
     const images = [...document.images].slice(0, 50).map((img) => ({ src: img.src, hasAlt: img.alt.trim().length > 0, aboveFold: img.getBoundingClientRect().top < window.innerHeight }));
 
-    return {
-      hasHorizontalOverflow,
-      overlapCandidates,
-      smallTapTargetCandidates,
-      headline,
-      headingHierarchy,
-      ctasVisible,
-      navPresent: Boolean(document.querySelector("nav")),
-      aboveFold: { text: aboveFoldText, ctaTexts: aboveFoldCtas, imageCount },
-      forms,
-      landmarks: { hasNav: Boolean(document.querySelector("nav")), hasFooter: Boolean(document.querySelector("footer")), hasMain: Boolean(document.querySelector("main")) },
-      images,
-    };
-  });
+    return { hasHorizontalOverflow, overlapCandidates, smallTapTargetCandidates, headline, headingHierarchy, ctasVisible, navPresent: Boolean(document.querySelector("nav")), aboveFold: { text: aboveFoldText, ctas: aboveFoldCtas, imageCount }, forms, landmarks: { hasNav: Boolean(document.querySelector("nav")), hasFooter: Boolean(document.querySelector("footer")), hasMain: Boolean(document.querySelector("main")) }, images };
+  }, GEOMETRY_TIME_BUDGET_MS);
 
   return {
     viewport,
     headline: geometry.headline,
     headingHierarchy: geometry.headingHierarchy,
-    aboveFold: geometry.aboveFold,
+    aboveFold: { text: geometry.aboveFold.text, ctaTexts: geometry.aboveFold.ctas, imageCount: geometry.aboveFold.imageCount },
     ctasVisible: geometry.ctasVisible,
     navPresent: geometry.navPresent,
     hasHorizontalOverflow: geometry.hasHorizontalOverflow,
-    overlapCandidates: geometry.overlapCandidates,
+    // Geometry itself is "verified" — it was measured. Whether a candidate represents a
+    // real problem is always "inferred": an overlay can be intentional, a small target
+    // can satisfy one of WCAG 2.5.8's five exceptions. Never claim "verified" on the
+    // conclusion, only on the fact that the scan ran.
+    overlapCandidates: geometry.overlapCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("overlap", viewport, c.selector, c.issue), status: "inferred" as const })),
     overlapCandidatesStatus: "verified",
-    smallTapTargetCandidates: viewport === "mobile" ? geometry.smallTapTargetCandidates : null,
+    smallTapTargetCandidates: viewport === "mobile" ? geometry.smallTapTargetCandidates.map((c) => ({ ...c, evidenceId: makeEvidenceId("tap-target", viewport, c.selector), status: "inferred" as const })) : null,
     smallTapTargetCandidatesStatus: viewport === "mobile" ? "verified" : "not-assessed",
     forms: geometry.forms,
     landmarks: geometry.landmarks,
@@ -712,49 +962,34 @@ async function extractEvidence(page: Page, viewport: "desktop" | "mobile"): Prom
 }
 ```
 
-Note: `cookieBanner` here is a placeholder default — Task 6 replaces it with the real detect/dismiss result before `extractEvidence()`'s return value is used.
-
-- [ ] **Step 2: Wrap geometry extraction in a try/catch inside `scanHomepage()` (not yet wired — this step only prepares the call sites)**
-
-This task only adds the function; Task 6 and Task 13 wire it into `scanHomepage()`'s control flow (since the cookie-banner detect step must run first and be merged in). Leave `extractEvidence` unused-but-exported for now — TypeScript won't error on an unused top-level function in this codebase's `tsconfig` (`noUnusedLocals` is not set for exported functions); confirm via the typecheck in Step 3.
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 2: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts
 git add src/lib/audit/browser-scanner.ts
-git commit -m "feat: add per-viewport evidence extraction with geometry candidates"
+git commit -m "feat: per-viewport geometry extraction with evidenceId and honest inferred status"
 ```
 
 ---
 
-### Task 6: Cookie banner — detect/dismiss split and blocking check
+### Task B2: Cookie banner — detect/dismiss split, blocking check, screenshot-only-if-detected with size cap
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts`
+**Files:** Modify `src/lib/audit/browser-scanner.ts`
 
-**Interfaces:**
-- Consumes: `CookieBannerEvidence` (Task 1).
-- Produces: `detectAndDismissCookieBanner(page: Page): Promise<CookieBannerEvidence & { beforeScreenshot?: Buffer; afterScreenshot?: Buffer }>`, replacing calls to the old `dismissCookieBanner()`.
-
-- [ ] **Step 1: Replace `dismissCookieBanner()` with the split detect/dismiss/blocking function**
-
-Replace the existing `dismissCookieBanner` function (lines 9-21) with:
+- [ ] **Step 1: Replace `dismissCookieBanner()`**
 
 ```ts
+const MAX_SCREENSHOT_BYTES = 3_000_000;
+
+function capScreenshot(buffer: Buffer): Buffer | undefined {
+  return buffer.length <= MAX_SCREENSHOT_BYTES ? buffer : undefined;
+}
+
 async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: import("@/lib/audit/evidence-types").CookieBannerEvidence; beforeScreenshot?: Buffer; afterScreenshot?: Buffer }> {
   const detection = await page.evaluate((patterns: string[]) => {
     const regexes = patterns.map((p) => new RegExp(p, "i"));
     const candidates = [...document.querySelectorAll("[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[role=dialog]")];
-    const banner = candidates.find((el) => {
-      const rect = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    });
+    const banner = candidates.find((el) => { const rect = el.getBoundingClientRect(); const style = window.getComputedStyle(el); return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none"; });
     if (!banner) return { detected: false, buttonsFound: [] as string[], blocking: null as boolean | null };
     const buttons = [...banner.querySelectorAll("button,a[role=button],a")].map((b) => (b.textContent ?? "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 10);
     const style = window.getComputedStyle(banner);
@@ -762,125 +997,70 @@ async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: imp
     const coversMost = rect.width >= window.innerWidth * 0.6 && rect.height >= window.innerHeight * 0.6;
     const isFixedOrSticky = style.position === "fixed" || style.position === "sticky";
     const bodyLocked = window.getComputedStyle(document.body).overflow === "hidden";
-    const blocking = (coversMost && isFixedOrSticky) || bodyLocked;
-    return { detected: true, buttonsFound: buttons, blocking, matchedButton: buttons.find((label) => regexes.some((re) => re.test(label))) ?? null };
+    return { detected: true, buttonsFound: buttons, blocking: (coversMost && isFixedOrSticky) || bodyLocked };
   }, COOKIE_CONSENT_PATTERNS.map((p) => p.source));
 
+  // Screenshots are captured only when a banner was actually detected — never
+  // speculatively, and never for a page with no banner at all.
   if (!detection.detected) {
     return { evidence: { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [] } };
   }
 
   let beforeScreenshot: Buffer | undefined;
-  try { beforeScreenshot = Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 })); } catch { /* screenshot best-effort */ }
+  try { beforeScreenshot = capScreenshot(Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 }))); } catch { /* best-effort */ }
 
   let dismissed = false;
   for (const pattern of COOKIE_CONSENT_PATTERNS) {
     const button = page.getByRole("button", { name: pattern }).first();
     try {
-      if (await button.isVisible({ timeout: 400 })) {
-        await button.click({ timeout: 1500 });
-        await page.waitForTimeout(400);
-        dismissed = true;
-        break;
-      }
+      if (await button.isVisible({ timeout: 400 })) { await button.click({ timeout: 1500 }); await page.waitForTimeout(400); dismissed = true; break; }
     } catch { /* pattern not present, try the next one */ }
   }
 
   let afterScreenshot: Buffer | undefined;
-  try { afterScreenshot = Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 })); } catch { /* screenshot best-effort */ }
+  try { afterScreenshot = capScreenshot(Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 }))); } catch { /* best-effort */ }
 
   return {
-    evidence: {
-      detected: true,
-      dismissAttempted: true,
-      dismissed,
-      blocking: detection.blocking,
-      blockingStatus: detection.blocking === null ? "not-assessed" : "verified",
-      buttonsFound: detection.buttonsFound,
-    },
+    evidence: { detected: true, dismissAttempted: true, dismissed, blocking: detection.blocking, blockingStatus: detection.blocking === null ? "not-assessed" : "verified", buttonsFound: detection.buttonsFound },
     beforeScreenshot,
     afterScreenshot,
   };
 }
 ```
 
-- [ ] **Step 2: Update `scanHomepage()`'s desktop pass to use the new function**
+- [ ] **Step 2: Wire into `scanHomepage()`** (desktop and mobile passes), using `deriveLegacyCookieBanner` for the legacy field: `pageData.cookieBanner = deriveLegacyCookieBanner(cookieDesktop.evidence);`, with `import { deriveLegacyCookieBanner } from "@/lib/audit/evidence-legacy";` added.
 
-In `scanHomepage()`, replace:
-
-```ts
-const cookieDismissedDesktop = await dismissCookieBanner(desktopPage);
-const pageData = await extract(desktopPage);
-pageData.cookieBanner = { detected: cookieDismissedDesktop, dismissed: cookieDismissedDesktop };
-```
-
-with:
-
-```ts
-const cookieDesktop = await detectAndDismissCookieBanner(desktopPage);
-const pageData = await extract(desktopPage);
-pageData.cookieBanner = deriveLegacyCookieBanner(cookieDesktop.evidence);
-```
-
-(Add `import { deriveLegacyCookieBanner } from "@/lib/audit/evidence-legacy";` to `browser-scanner.ts`'s imports — this is the same single-source-of-truth derivation function from Task 4, not a second inline computation.)
-
-And replace the mobile pass's:
-
-```ts
-await dismissCookieBanner(mobilePage);
-```
-
-with:
-
-```ts
-const cookieMobile = await detectAndDismissCookieBanner(mobilePage);
-```
-
-(`cookieDesktop`/`cookieMobile` are consumed fully in Task 13, where `scanHomepage()`'s return type gains the evidence/screenshot fields — this task only makes the detect/dismiss call itself correct and typed; leaving the variables assigned-but-not-yet-returned is fine, confirmed by the typecheck below not erroring on unused locals since they're consumed in the same function scope trivially via the assignment — if `tsc`/`eslint` flag them as unused because nothing reads them yet within this task, add a temporary `void cookieDesktop; void cookieMobile;` line after each, removed again in Task 13 once they're threaded into the return value.)
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts`
-Expected: no errors (add the temporary `void` lines from Step 2's note if `no-unused-vars` fires).
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts
 git add src/lib/audit/browser-scanner.ts
-git commit -m "feat: split cookie banner detection from dismissal, add blocking check"
+git commit -m "feat: cookie banner detect/dismiss split, screenshot only if detected, size cap"
 ```
 
 ---
 
-### Task 7: CTA journeys — typed outcome, redirect chain, per-hop SSRF revalidation
+### Task B3: CTA journeys — evidenceId, `blocked-unsafe-redirect`, screenshot-by-id
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts`
-
-**Interfaces:**
-- Consumes: `CtaJourneyEvidence`, `CtaOutcome` (Task 1).
-- Produces: `testCtaJourneysEvidence(context, sourceUrl, ctas): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]>`, replacing `testCtaJourneys()`.
+**Files:** Modify `src/lib/audit/browser-scanner.ts`
 
 - [ ] **Step 1: Replace `testCtaJourneys()`**
-
-Replace the existing `testCtaJourneys` function (lines 87-105) with:
 
 ```ts
 async function countRedirects(response: import("playwright").Response | null): Promise<number> {
   let count = 0;
   let current = response?.request().redirectedFrom() ?? null;
-  while (current) {
-    count += 1;
-    current = current.redirectedFrom();
-  }
+  while (current) { count += 1; current = current.redirectedFrom(); }
   return count;
+}
+
+function isSafetyBlock(message: string): boolean {
+  return /blockedbyclient|private network|resolves to a private|cannot be audited|could not be resolved/i.test(message);
 }
 
 async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, ctas: ExtractedPage["ctas"]): Promise<{ evidence: import("@/lib/audit/evidence-types").CtaJourneyEvidence; screenshot?: Buffer }[]> {
   const source = new URL(sourceUrl);
-  const httpCandidates = ctas.filter((cta) => {
-    try { return ["http:", "https:"].includes(new URL(cta.href, source).protocol); } catch { return false; }
-  });
+  const httpCandidates = ctas.filter((cta) => { try { return ["http:", "https:"].includes(new URL(cta.href, source).protocol); } catch { return false; } });
   const invalidCandidates = ctas.filter((cta) => !httpCandidates.includes(cta));
   const tested = httpCandidates.slice(0, 5);
   const overLimit = httpCandidates.slice(5);
@@ -888,8 +1068,9 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
   const testedResults = await Promise.all(tested.map(async (cta) => {
     const destination = new URL(cta.href, source);
     const sameOrigin = destination.origin === source.origin;
+    const evidenceId = makeEvidenceId("cta", destination.toString(), cta.text);
     if (!sameOrigin) {
-      return { evidence: { text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } };
+      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } };
     }
     const probe = await context.newPage();
     try {
@@ -898,12 +1079,16 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
       const redirectCount = await countRedirects(response);
       const screenshot = response?.ok() ? Buffer.from(await probe.screenshot({ type: "jpeg", quality: 70 })) : undefined;
       const outcome: import("@/lib/audit/evidence-types").CtaOutcome = !response ? "network-error" : !response.ok() ? "http-error" : redirectCount > 0 ? "redirected" : "navigated";
-      return {
-        evidence: { text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, finalUrl: probe.url(), redirectCount, httpStatus: response?.status(), outcome },
-        screenshot,
-      };
+      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, finalUrl: probe.url(), redirectCount, httpStatus: response?.status(), outcome, error: outcome === "network-error" ? "No response received" : undefined }, screenshot };
     } catch (error) {
-      return { evidence: { text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "network-error" as const, error: error instanceof Error ? error.message : "Could not load" } };
+      const message = error instanceof Error ? error.message : "Could not load";
+      // A redirect toward a private/unsafe address is a deliberate protection firing,
+      // not a generic transport failure — record it distinctly, with a fixed generic
+      // message so the real (possibly private) address is never persisted.
+      if (isSafetyBlock(message)) {
+        return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "blocked-unsafe-redirect" as const, error: "Blocked: navigation to a private/unsafe address was prevented" } };
+      }
+      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "network-error" as const, error: message.slice(0, 300) } };
     } finally {
       await probe.close();
     }
@@ -911,80 +1096,44 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
 
   const overLimitResults = overLimit.map((cta) => {
     const destination = new URL(cta.href, source);
-    return { evidence: { text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin: destination.origin === source.origin, navigationAttempted: false, outcome: "skipped-limit" as const, skippedReason: "Not tested — audit is capped at the first 5 conversion paths" } };
+    return { evidence: { evidenceId: makeEvidenceId("cta", destination.toString(), cta.text), text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin: destination.origin === source.origin, navigationAttempted: false, outcome: "skipped-limit" as const, skippedReason: "Not tested — audit is capped at the first 5 conversion paths" } };
   });
 
   const invalidResults = invalidCandidates.map((cta) => ({
-    evidence: { text: cta.text, element: cta.tag, declaredUrl: cta.href, sameOrigin: false, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" },
+    evidence: { evidenceId: makeEvidenceId("cta", cta.href, cta.text), text: cta.text, element: cta.tag, declaredUrl: cta.href, sameOrigin: false, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" },
   }));
 
   return [...testedResults, ...overLimitResults, ...invalidResults];
 }
 ```
 
-Every redirect hop is already re-validated because `assertSafeUrl(probe.url())` runs on the **final** URL after Playwright follows the full redirect chain, and `secureContext()`'s existing `context.route("**/*", ...)` handler (lines 29-36, unchanged) calls `assertSafeUrl` on **every** request the context makes — including each intermediate redirect hop, not just the final one, since Playwright's route interception fires per-request, not just for the top-level navigation. This is what the Task 16 fixture's redirect-to-private-address case proves in a live run.
+A CTA journey never throws out of this function — `blocked-unsafe-redirect` is returned as a normal evidence record, so a private-address redirect **cannot fail the whole audit**; it only marks that one journey.
 
-- [ ] **Step 2: Update `scanHomepage()` to use the new function**
+- [ ] **Step 2: Screenshot upload matched by `evidenceId`, not array index**
 
-Replace:
-
-```ts
-const ctaResults = await testCtaJourneys(desktop, pageData.url, pageData.ctas);
-pageData.ctaJourneys = ctaResults.map((result) => ({ text: result.text, destination: result.destination, outcome: result.outcome, sameOrigin: result.sameOrigin }));
-const ctaScreenshots = ctaResults
-  .map((result, index) => ({ index, buffer: result.screenshot }))
-  .filter((entry): entry is { index: number; buffer: Buffer } => Boolean(entry.buffer));
-```
-
-with:
+Change `uploadCtaScreenshots` (Checkpoint C's storage-layer task) to accept `{ evidenceId, buffer }[]` and return `{ evidenceId, path }[]`, matching back via `ctaJourneys.find((j) => j.evidenceId === evidenceId)` rather than `ctaJourneys[index]`. Update `scanHomepage()`'s `ctaScreenshots` construction to carry `evidenceId` alongside each buffer:
 
 ```ts
-const ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, pageData.ctas);
-const { deriveLegacyCtaJourneys } = await import("@/lib/audit/evidence-legacy");
-pageData.ctaJourneys = deriveLegacyCtaJourneys(ctaResults.map((r) => r.evidence));
 const ctaScreenshots = ctaResults
-  .map((result, index) => ({ index, buffer: result.screenshot }))
-  .filter((entry): entry is { index: number; buffer: Buffer } => Boolean(entry.buffer));
+  .map((result) => ({ evidenceId: result.evidence.evidenceId, buffer: result.screenshot }))
+  .filter((entry): entry is { evidenceId: string; buffer: Buffer } => Boolean(entry.buffer));
 ```
 
-(A dynamic `import()` is used here only because `evidence-legacy.ts` is a small leaf module with no circular dependency risk back to `browser-scanner.ts`; a normal top-of-file `import` is equally correct and preferred — use a regular static `import { deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";` at the top of `browser-scanner.ts` instead, matching the file's existing import style.)
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts
 git add src/lib/audit/browser-scanner.ts
-git commit -m "feat: typed CTA outcomes with redirect count and per-hop SSRF revalidation"
+git commit -m "feat: typed CTA outcomes with blocked-unsafe-redirect and id-based screenshot mapping"
 ```
 
 ---
 
-### Task 8: SEO evidence extraction
+### Task B4: SEO evidence — IDs, redirect chain cap, sanitize-before-hash for JSON-LD
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts`
-
-**Interfaces:**
-- Consumes: `SeoEvidence`, `JsonLdEvidence` (Task 1), `sanitizeUrl`/`hashContent`/`sanitizeText` (Task 2).
-- Produces: `extractSeoEvidence(page: Page, response: import("playwright").Response | null): Promise<SeoEvidence>`.
+**Files:** Modify `src/lib/audit/browser-scanner.ts`
 
 - [ ] **Step 1: Extend `settle()` to return the navigation `Response`**
-
-Replace:
-
-```ts
-async function settle(page: Page, url: string) {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  await page.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
-  await page.waitForTimeout(700);
-}
-```
-
-with:
 
 ```ts
 async function settle(page: Page, url: string) {
@@ -995,31 +1144,39 @@ async function settle(page: Page, url: string) {
 }
 ```
 
-Update both call sites in `scanHomepage()` to capture the return value: `const desktopResponse = await settle(desktopPage, url);` and `const mobileResponse = await settle(mobilePage, pageData.url);`.
+Update both call sites in `scanHomepage()` to capture the return value.
 
-- [ ] **Step 2: Add `extractSeoEvidence()`**
+- [ ] **Step 2: `extractSeoEvidence()`**
 
 ```ts
-import { sanitizeUrl, sanitizeText, hashContent } from "@/lib/audit/evidence-sanitize";
+import { sanitizeUrl, sanitizeText, redactSensitivePatterns, hashContent } from "@/lib/audit/evidence-sanitize";
 
 async function extractSeoEvidence(page: Page, response: import("playwright").Response | null): Promise<import("@/lib/audit/evidence-types").SeoEvidence> {
   const raw = await page.evaluate(() => {
     const attr = (selector: string, name: string) => document.querySelector(selector)?.getAttribute(name) ?? null;
-    const canonical = attr('link[rel="canonical"]', "href");
-    const robotsMeta = attr('meta[name="robots"]', "content");
-    const htmlLang = document.documentElement.getAttribute("lang");
-    const viewportMeta = attr('meta[name="viewport"]', "content");
-    const hreflang = [...document.querySelectorAll('link[rel="alternate"][hreflang]')].map((el) => ({ lang: el.getAttribute("hreflang") ?? "", href: (el as HTMLLinkElement).href })).slice(0, 50);
-    const openGraph = [...document.querySelectorAll('meta[property^="og:"]')].map((el) => ({ property: el.getAttribute("property") ?? "", content: el.getAttribute("content") ?? "" })).slice(0, 30);
-    const jsonLdScripts = [...document.querySelectorAll('script[type="application/ld+json"]')].map((el) => el.textContent ?? "").slice(0, 10);
-    const links = [...document.querySelectorAll("a[href]")].map((el) => ({ text: (el.textContent ?? "").replace(/\s+/g, " ").trim(), href: (el as HTMLAnchorElement).href })).slice(0, 150);
-    const headings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].map((el) => ({ level: Number(el.tagName[1]), text: (el.textContent ?? "").replace(/\s+/g, " ").trim() })).filter((h) => h.text).slice(0, 80);
-    return { canonical, robotsMeta, htmlLang, viewportMeta, hreflang, openGraph, jsonLdScripts, links, headings, title: document.title, metaDescription: attr('meta[name="description"]', "content"), visibleText: (document.body.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 30_000) };
+    return {
+      canonical: attr('link[rel="canonical"]', "href"),
+      robotsMeta: attr('meta[name="robots"]', "content"),
+      htmlLang: document.documentElement.getAttribute("lang"),
+      viewportMeta: attr('meta[name="viewport"]', "content"),
+      hreflang: [...document.querySelectorAll('link[rel="alternate"][hreflang]')].map((el) => ({ lang: el.getAttribute("hreflang") ?? "", href: (el as HTMLLinkElement).href })).slice(0, 50),
+      openGraph: [...document.querySelectorAll('meta[property^="og:"]')].map((el) => ({ property: el.getAttribute("property") ?? "", content: el.getAttribute("content") ?? "" })).slice(0, 30),
+      jsonLdScripts: [...document.querySelectorAll('script[type="application/ld+json"]')].map((el) => el.textContent ?? "").slice(0, 10),
+      links: [...document.querySelectorAll("a[href]")].map((el) => ({ text: (el.textContent ?? "").replace(/\s+/g, " ").trim(), href: (el as HTMLAnchorElement).href })).slice(0, 150),
+      headings: [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")].map((el) => ({ level: Number(el.tagName[1]), text: (el.textContent ?? "").replace(/\s+/g, " ").trim() })).filter((h) => h.text).slice(0, 80),
+      title: document.title,
+      metaDescription: attr('meta[name="description"]', "content"),
+      visibleText: (document.body.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 30_000),
+    };
   });
 
   const matchableTypes = new Set(["Product", "Article"]);
   const jsonLd: import("@/lib/audit/evidence-types").JsonLdEvidence[] = raw.jsonLdScripts.map((script) => {
-    const excerptHash = hashContent(script);
+    // Redact BEFORE hashing/excerpting — the hash and excerpt must never be derivable
+    // back to potentially sensitive raw content the page author embedded.
+    const redactedScript = redactSensitivePatterns(script);
+    const excerptHash = hashContent(redactedScript);
+    const evidenceId = `jsonld:${excerptHash.slice(0, 12)}`;
     try {
       const parsedJson = JSON.parse(script) as Record<string, unknown> & { "@type"?: string | string[] };
       const types = Array.isArray(parsedJson["@type"]) ? (parsedJson["@type"] as string[]) : parsedJson["@type"] ? [parsedJson["@type"] as string] : [];
@@ -1029,13 +1186,15 @@ async function extractSeoEvidence(page: Page, response: import("playwright").Res
       if (matchableType) {
         const nameField = (parsedJson.name ?? parsedJson.headline) as string | undefined;
         if (typeof nameField === "string" && nameField.trim()) {
+          // A substring match is deterministic but not a robust semantic verification —
+          // record it as "inferred", never "verified".
           contentMatch = raw.visibleText.includes(nameField.trim());
-          contentMatchStatus = "verified";
+          contentMatchStatus = "inferred";
         }
       }
-      return { parsed: true, types, excerptHash, sanitizedExcerpt: sanitizeText(script, 400), contentMatch, contentMatchStatus };
+      return { evidenceId, parsed: true, types, excerptHash, sanitizedExcerpt: sanitizeText(redactedScript, 400), contentMatch, contentMatchStatus };
     } catch (error) {
-      return { parsed: false, types: [], parseError: sanitizeText(error instanceof Error ? error.message : "Invalid JSON-LD", 300), excerptHash, contentMatch: null, contentMatchStatus: "not-assessed" as const };
+      return { evidenceId, parsed: false, types: [], parseError: sanitizeText(error instanceof Error ? error.message : "Invalid JSON-LD", 300), excerptHash, contentMatch: null, contentMatchStatus: "not-assessed" as const };
     }
   });
 
@@ -1058,8 +1217,8 @@ async function extractSeoEvidence(page: Page, response: import("playwright").Res
     htmlLang: raw.htmlLang,
     viewportMeta: raw.viewportMeta,
     headings: raw.headings,
-    hreflang: raw.hreflang,
-    openGraph: raw.openGraph,
+    hreflang: raw.hreflang.map((h) => ({ evidenceId: makeEvidenceId("hreflang", h.lang, h.href), ...h })),
+    openGraph: raw.openGraph.map((og) => ({ evidenceId: makeEvidenceId("og", og.property, og.content), ...og })),
     jsonLd,
     links: raw.links.map((link) => ({ text: link.text, href: sanitizeUrl(link.href), sameOrigin: (() => { try { return new URL(link.href).origin === new URL(raw.canonical ?? response?.url() ?? "").origin; } catch { return false; } })() })),
     pageStatus: { initialStatus: redirectChain[0]?.status ?? response?.status() ?? null, finalStatus: response?.status() ?? null, redirectChain },
@@ -1067,30 +1226,19 @@ async function extractSeoEvidence(page: Page, response: import("playwright").Res
 }
 ```
 
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts
 git add src/lib/audit/browser-scanner.ts
-git commit -m "feat: extract SEO evidence (canonical, robots, hreflang, OG, JSON-LD, redirect chain)"
+git commit -m "feat: SEO evidence extraction with IDs and sanitize-before-hash JSON-LD"
 ```
 
 ---
 
-### Task 9: Console and network evidence capture
+### Task B5: Console/network evidence with IDs
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts`
-
-**Interfaces:**
-- Consumes: `ConsoleNetworkEvidence` (Task 1), `sanitizeUrl`/`sanitizeText` (Task 2).
-- Produces: `attachConsoleNetworkCapture(page: Page): () => ConsoleNetworkEvidence` — call before navigation, invoke the returned function after settling to get the collected evidence.
-
-- [ ] **Step 1: Add the capture function**
+**Files:** Modify `src/lib/audit/browser-scanner.ts`
 
 ```ts
 const MAX_CONSOLE_ERRORS = 20;
@@ -1102,33 +1250,15 @@ function attachConsoleNetworkCapture(page: Page): () => import("@/lib/audit/evid
   const failedRequests: { url: string; resourceType: string; domain: string; status: number | null; message?: string }[] = [];
   let truncated = false;
 
-  page.on("console", (message) => {
-    if (message.type() !== "error") return;
-    if (consoleErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; }
-    consoleErrors.push({ message: sanitizeText(message.text(), 500), timestamp: new Date().toISOString() });
-  });
-  page.on("pageerror", (error) => {
-    if (pageErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; }
-    pageErrors.push({ message: sanitizeText(error.message, 500), timestamp: new Date().toISOString() });
-  });
-  page.on("requestfailed", (request) => {
-    if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; }
-    let domain = "";
-    try { domain = new URL(request.url()).hostname; } catch { /* ignore */ }
-    failedRequests.push({ url: sanitizeUrl(request.url()), resourceType: request.resourceType(), domain, status: null, message: sanitizeText(request.failure()?.errorText ?? "Request failed", 300) });
-  });
-  page.on("response", (response) => {
-    if (response.status() < 400) return;
-    if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; }
-    let domain = "";
-    try { domain = new URL(response.url()).hostname; } catch { /* ignore */ }
-    failedRequests.push({ url: sanitizeUrl(response.url()), resourceType: response.request().resourceType(), domain, status: response.status() });
-  });
+  page.on("console", (message) => { if (message.type() !== "error") return; if (consoleErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; } consoleErrors.push({ message: sanitizeText(message.text(), 500), timestamp: new Date().toISOString() }); });
+  page.on("pageerror", (error) => { if (pageErrors.length >= MAX_CONSOLE_ERRORS) { truncated = true; return; } pageErrors.push({ message: sanitizeText(error.message, 500), timestamp: new Date().toISOString() }); });
+  page.on("requestfailed", (request) => { if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; } let domain = ""; try { domain = new URL(request.url()).hostname; } catch { /* ignore */ } failedRequests.push({ url: sanitizeUrl(request.url()), resourceType: request.resourceType(), domain, status: null, message: sanitizeText(request.failure()?.errorText ?? "Request failed", 300) }); });
+  page.on("response", (response) => { if (response.status() < 400) return; if (failedRequests.length >= MAX_FAILED_REQUESTS) { truncated = true; return; } let domain = ""; try { domain = new URL(response.url()).hostname; } catch { /* ignore */ } failedRequests.push({ url: sanitizeUrl(response.url()), resourceType: response.request().resourceType(), domain, status: response.status() }); });
 
   return () => ({
-    consoleErrors: dedupe(consoleErrors),
-    pageErrors: dedupe(pageErrors),
-    failedRequests,
+    consoleErrors: dedupe(consoleErrors).map((e) => ({ evidenceId: makeEvidenceId("console", e.message), ...e })),
+    pageErrors: dedupe(pageErrors).map((e) => ({ evidenceId: makeEvidenceId("pageerror", e.message), ...e })),
+    failedRequests: failedRequests.map((r) => ({ evidenceId: makeEvidenceId("network", r.url, r.resourceType), ...r })),
     limits: { maxConsoleErrors: MAX_CONSOLE_ERRORS, maxFailedRequests: MAX_FAILED_REQUESTS, truncated },
   });
 }
@@ -1139,109 +1269,33 @@ function dedupe<T extends { message: string }>(items: T[]): T[] {
 }
 ```
 
-- [ ] **Step 2: Wire the capture into both viewport passes in `scanHomepage()`**
+Wire `attachConsoleNetworkCapture(page)` before each viewport's `settle()` call, capture the result after.
 
-Immediately after each `newPage()` call and before `settle()`, add:
-
-```ts
-const desktopConsoleCapture = attachConsoleNetworkCapture(desktopPage);
-```
-
-(and the equivalent `mobileConsoleCapture` for the mobile page), then after each page's `settle()` call, capture the result: `const desktopConsoleNetwork = desktopConsoleCapture();` / `const mobileConsoleNetwork = mobileConsoleCapture();`. These four new local variables are consumed in Task 13 when `scanHomepage()`'s return type is extended — until then, if `eslint`'s `no-unused-vars` fires, add temporary `void` lines as in Task 6.
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] Typecheck, lint, commit:
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts
 git add src/lib/audit/browser-scanner.ts
-git commit -m "feat: capture console errors, page errors, and failed requests per viewport"
+git commit -m "feat: console/network evidence capture with evidenceId"
 ```
+
+- [ ] **Checkpoint B self-review:** every scanner-produced record (overlap, tap-target, CTA, console, network, hreflang, OG, JSON-LD) carries `evidenceId`; cookie screenshots only exist when detected and are size-capped; CTA screenshot matching is by `evidenceId`; the SSRF-blocked CTA path never throws out of `testCtaJourneysEvidence`; redirect chain is capped at 20 matching the schema. Fix anything missing before Checkpoint C.
 
 ---
 
-### Task 10: Cookie screenshot lifecycle
+## Checkpoint C — Assembly
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts` (`BrowserScanResult` type, `scanHomepage()` return)
-- Modify: `src/lib/storage/screenshots.ts` (new upload function)
+### Task C1: Performance evidence from real Lighthouse config, and the `raw_lighthouse_json` privacy fix
 
-**Interfaces:**
-- Consumes: `Buffer`s from Task 6's `detectAndDismissCookieBanner()`.
-- Produces: `uploadCookieBannerScreenshots(auditId, buffers): Promise<{ desktop: { before?: string; after?: string }; mobile: { before?: string; after?: string } }>`.
+**Files:** Modify `src/lib/audit/lighthouse-scanner.ts`
 
-- [ ] **Step 1: Add the upload function**
-
-In `src/lib/storage/screenshots.ts`, add after `uploadCtaScreenshots`:
+- [ ] **Step 1: Fix `inpOrTbt`, read real config for `testConditions`, stop persisting full `lhr`, return `lhr` separately for the accessibility helper**
 
 ```ts
-export async function uploadCookieBannerScreenshots(auditId: string, buffers: { desktop: { before?: Buffer; after?: Buffer }; mobile: { before?: Buffer; after?: Buffer } }) {
-  const bucket = process.env.SUPABASE_SCREENSHOTS_BUCKET ?? "audit-screenshots";
-  const db = getSupabaseAdmin();
-  const jobs: { key: "desktop.before" | "desktop.after" | "mobile.before" | "mobile.after"; buffer: Buffer; path: string }[] = [];
-  if (buffers.desktop.before) jobs.push({ key: "desktop.before", buffer: buffers.desktop.before, path: `${auditId}/cookie-banner-desktop-before.jpg` });
-  if (buffers.desktop.after) jobs.push({ key: "desktop.after", buffer: buffers.desktop.after, path: `${auditId}/cookie-banner-desktop-after.jpg` });
-  if (buffers.mobile.before) jobs.push({ key: "mobile.before", buffer: buffers.mobile.before, path: `${auditId}/cookie-banner-mobile-before.jpg` });
-  if (buffers.mobile.after) jobs.push({ key: "mobile.after", buffer: buffers.mobile.after, path: `${auditId}/cookie-banner-mobile-after.jpg` });
-
-  const results: { desktop: { before?: string; after?: string }; mobile: { before?: string; after?: string } } = { desktop: {}, mobile: {} };
-  let uploadFailed = false;
-  await Promise.all(jobs.map(async (job) => {
-    const { error } = await db.storage.from(bucket).upload(job.path, job.buffer, { contentType: "image/jpeg", upsert: true });
-    if (error) { uploadFailed = true; return; }
-    const { data } = db.storage.from(bucket).getPublicUrl(job.path);
-    const [viewport, phase] = job.key.split(".") as ["desktop" | "mobile", "before" | "after"];
-    results[viewport][phase] = data.publicUrl;
-  }));
-  return { ...results, uploadFailed };
-}
+inpOrTbt: numeric(audits["total-blocking-time"]), // was: numeric(audits["interaction-to-next-paint"] ?? audits["total-blocking-time"])
 ```
 
-- [ ] **Step 2: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/storage/screenshots.ts`
-Expected: no errors.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/lib/storage/screenshots.ts
-git commit -m "feat: add cookie-banner screenshot upload with per-image failure tracking"
-```
-
----
-
-### Task 11: Performance evidence assembly and `lighthouse-scanner.ts` fix
-
-**Files:**
-- Modify: `src/lib/audit/lighthouse-scanner.ts`
-
-**Interfaces:**
-- Consumes: `PerformanceEvidence` (Task 1).
-- Produces: `runLighthouse()` now also returns `evidence: PerformanceEvidence` alongside the existing `AuditMetrics` return value.
-
-- [ ] **Step 1: Fix the `inpOrTbt` fallback and add evidence assembly**
-
-Replace the `inpOrTbt` line:
-
-```ts
-inpOrTbt: numeric(audits["interaction-to-next-paint"] ?? audits["total-blocking-time"]),
-```
-
-with:
-
-```ts
-inpOrTbt: numeric(audits["total-blocking-time"]),
-```
-
-(This is the one small, spec-justified correction to existing behavior — `inpOrTbt` now always holds the same TBT-only value as `evidence.performance.lab.tbt`, never an unscripted-run INP reading passed off as one or the other.)
-
-- [ ] **Step 2: Change the return type and assemble `PerformanceEvidence`**
-
-Change the function signature from `Promise<AuditMetrics>` to `Promise<{ metrics: AuditMetrics; evidence: import("@/lib/audit/evidence-types").PerformanceEvidence }>`, and change the `return { ... }` statement (currently the object literal ending with `raw: lhr`) to:
+Change the function's return type to `Promise<{ metrics: AuditMetrics; evidence: PerformanceEvidence; lhr: import("lighthouse").Result }>` (the raw `lhr` travels separately now, since `metrics.raw` no longer holds it — see below) and assemble:
 
 ```ts
 const metrics: AuditMetrics = {
@@ -1256,117 +1310,118 @@ const metrics: AuditMetrics = {
   imageIssues,
   renderBlockingResources: detailItems(audits["render-blocking-resources"]).length,
   scriptWeightBytes: Number(detailItems(audits["resource-summary"]).find((item) => item.resourceType === "script")?.transferSize ?? 0),
-  raw: lhr,
+  // Only a small, explicitly sanitized diagnostic subset — never the full lhr object,
+  // which can carry unsanitized URLs/query strings from every request Lighthouse made.
+  raw: { requestedUrl: sanitizeUrl(lhr.requestedUrl ?? ""), finalUrl: sanitizeUrl(lhr.finalUrl ?? ""), fetchTime: lhr.fetchTime, lighthouseVersion: lhr.lighthouseVersion },
 };
 
+const throttling = lhr.configSettings.throttling;
 const evidence: import("@/lib/audit/evidence-types").PerformanceEvidence = {
   lab: { lcp: metrics.lcp, cls: metrics.cls, tbt: metrics.inpOrTbt, ttfb: metrics.ttfb, source: "lighthouse", lighthouseVersion: lhr.lighthouseVersion },
   field: { source: "not-integrated", status: "not-assessed", percentile: null, periodDays: null, lcp: null, cls: null, inp: null },
-  testConditions: { formFactor: "desktop", throttlingMethod: null, cpuThrottling: null, networkProfile: null, locale: "en-US", lighthouseVersion: lhr.lighthouseVersion, runCount: 1, limitations: ["single lab run — not averaged across executions", "desktop viewport only"] },
+  testConditions: {
+    formFactor: (lhr.configSettings.formFactor as "desktop" | "mobile" | undefined) ?? "desktop",
+    throttlingMethod: lhr.configSettings.throttlingMethod ?? null,
+    cpuThrottling: throttling?.cpuSlowdownMultiplier != null ? `${throttling.cpuSlowdownMultiplier}x` : null,
+    networkProfile: throttling?.downloadThroughputKbps != null ? `${throttling.downloadThroughputKbps}kbps down / ${throttling.uploadThroughputKbps}kbps up` : null,
+    locale: lhr.configSettings.locale ?? "en-US",
+    lighthouseVersion: lhr.lighthouseVersion,
+    runCount: 1,
+    limitations: ["single lab run — not averaged across executions", "desktop viewport only"],
+  },
 };
 
-return { metrics, evidence };
+return { metrics, evidence, lhr };
 ```
 
-- [ ] **Step 3: Update `process-audit.ts`'s call site (temporary — full wiring happens in Task 13)**
+Add `import { sanitizeUrl } from "@/lib/audit/evidence-sanitize";` to `lighthouse-scanner.ts`. Grep `runLighthouse(` across `src/` and update every call site to destructure the new 3-field return.
 
-In `src/lib/audit/process-audit.ts`, change:
+- [ ] **Step 2: Automated-accessibility-checks helper**
 
 ```ts
-const metrics = await runLighthouse(browserResult.page.url);
-```
-
-to:
-
-```ts
-const { metrics, evidence: performanceEvidence } = await runLighthouse(browserResult.page.url);
-```
-
-(`performanceEvidence` is consumed fully in Task 13; if unused before then, add a temporary `void performanceEvidence;`.)
-
-- [ ] **Step 4: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/lighthouse-scanner.ts src/lib/audit/process-audit.ts`
-Expected: no errors. This will surface any other `runLighthouse()` call sites expecting the old bare-`AuditMetrics` return — grep for `runLighthouse(` across `src/` and update every call site the same way.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/lib/audit/lighthouse-scanner.ts src/lib/audit/process-audit.ts
-git commit -m "fix: stop conflating TBT/INP in inpOrTbt, assemble PerformanceEvidence"
-```
-
----
-
-### Task 12: Accessibility evidence assembly
-
-**Files:**
-- Modify: `src/lib/audit/lighthouse-scanner.ts`
-
-**Interfaces:**
-- Consumes: `AccessibilityEvidence` (Task 1).
-- Produces: `runLighthouse()`'s return value gains `accessibilityEvidence: AccessibilityEvidence`, sourced from the same Lighthouse `lhr` already computed in Task 11 plus the desktop `BrowserEvidence` (threaded in from Task 13, since `runLighthouse()` itself has no browser-evidence access — see Step 2).
-
-- [ ] **Step 1: Add a Lighthouse-only accessibility assembly helper**
-
-Add, in `lighthouse-scanner.ts`, a function that builds the Lighthouse-sourced half of `AccessibilityEvidence` (the desktop-browser-observation half is merged in by the caller in Task 13, since only `process-audit.ts` has both pieces at hand):
-
-```ts
-export function buildAutomatedAccessibilityChecks(lhr: import("lighthouse").Result): import("@/lib/audit/evidence-types").AccessibilityEvidence["automatedChecks"] {
+export function buildAutomatedAccessibilityChecks(lhr: import("lighthouse").Result): import("@/lib/audit/evidence-types").AccessibilityEvidence["desktop"]["automatedChecks"] {
   const accessibilityAudits = Object.values(lhr.audits).filter((audit) => lhr.categories.accessibility?.auditRefs.some((ref) => ref.id === audit.id));
-  const failedAudits = accessibilityAudits.filter((audit) => audit.score !== null && Number(audit.score) < 1).map((audit) => ({ id: audit.id, title: audit.title }));
-  return { source: "lighthouse", score: score(lhr.categories.accessibility?.score), failedAudits };
+  const failedAudits = accessibilityAudits.filter((audit) => audit.score !== null && Number(audit.score) < 1).map((audit) => ({ evidenceId: makeEvidenceId("accessibility", "desktop", audit.id), id: audit.id, title: audit.title }));
+  return { source: "lighthouse", status: "verified", score: score(lhr.categories.accessibility?.score), failedAudits };
 }
 ```
 
-- [ ] **Step 2: Export it alongside `runLighthouse`**
+Add `import { makeEvidenceId } from "@/lib/audit/evidence-id";` to `lighthouse-scanner.ts`.
 
-No further change needed inside `runLighthouse()` itself for this task — Task 13 calls `buildAutomatedAccessibilityChecks(lhr)` where it has access to the raw `lhr` result (it's already returned as `metrics.raw` from Task 11's assembly) and merges it with the desktop `BrowserEvidence.images`/`.forms` counts to build the full `AccessibilityEvidence`.
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/lighthouse-scanner.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/lighthouse-scanner.ts
 git add src/lib/audit/lighthouse-scanner.ts
-git commit -m "feat: assemble automated-checks half of AccessibilityEvidence from Lighthouse"
+git commit -m "fix: read Lighthouse test conditions from real config, stop persisting full raw JSON"
 ```
 
 ---
 
-### Task 13: Methodology assembly and full worker-pipeline wiring
+### Task C2: Storage layer — id-based CTA screenshot matching, precise cookie-screenshot failure reporting
 
-**Files:**
-- Modify: `src/lib/audit/browser-scanner.ts` (`BrowserScanResult` type, `scanHomepage()` return value)
-- Modify: `src/lib/audit/process-audit.ts` (assemble `AuditEvidenceV2`, sanitize, validate, persist)
-
-**Interfaces:**
-- Consumes: everything from Tasks 1-12.
-- Produces: a fully assembled, sanitized, Zod-validated `AuditEvidenceV2` attached to `browserResult.page.evidence` before `saveScan()`.
-
-This is the integration task — every piece built in Tasks 5-12 gets threaded together here. Re-read the current `scanHomepage()`/`processNextAudit()` in full before starting (they've been touched by every prior task in this plan).
-
-**Rethrow vs. record-and-continue, deliberately:** `desktop-dom`, `mobile-dom`, and `seo-extraction` failures are rethrown after being recorded — without a loaded desktop page there's no audit at all, so these are foundational. `cta-journey-desktop` failures are recorded but **not** rethrown — a broken conversion-path check shouldn't fail an otherwise-complete audit, so it degrades to an empty `ctaResults` and the run continues. This is why the two failure branches below look asymmetric; it's not an inconsistency to fix.
-
-- [ ] **Step 1: Extend `BrowserScanResult` and `scanHomepage()`'s return value**
-
-In `browser-scanner.ts`, change:
+**Files:** Modify `src/lib/storage/screenshots.ts`
 
 ```ts
-export interface BrowserScanResult { page: ExtractedPage; desktopScreenshot: Buffer; mobileScreenshot: Buffer; ctaScreenshots: { index: number; buffer: Buffer }[]; }
+export async function uploadCtaScreenshots(auditId: string, screenshots: { evidenceId: string; buffer: Buffer }[]) {
+  if (!screenshots.length) return [];
+  const bucket = process.env.SUPABASE_SCREENSHOTS_BUCKET ?? "audit-screenshots";
+  const db = getSupabaseAdmin();
+  return Promise.all(screenshots.map(async ({ evidenceId, buffer }) => {
+    const path = `${auditId}/cta-${evidenceId.replace(/[^a-z0-9-]/gi, "_")}.jpg`;
+    const { error } = await db.storage.from(bucket).upload(path, buffer, { contentType: "image/jpeg", upsert: true });
+    if (error) throw error;
+    const { data } = db.storage.from(bucket).getPublicUrl(path);
+    return { evidenceId, path: data.publicUrl };
+  }));
+}
+
+export async function uploadCookieBannerScreenshots(auditId: string, buffers: { desktop: { before?: Buffer; after?: Buffer }; mobile: { before?: Buffer; after?: Buffer } }) {
+  const bucket = process.env.SUPABASE_SCREENSHOTS_BUCKET ?? "audit-screenshots";
+  const db = getSupabaseAdmin();
+  const jobs: { key: "desktop.before" | "desktop.after" | "mobile.before" | "mobile.after"; buffer: Buffer; path: string }[] = [];
+  if (buffers.desktop.before) jobs.push({ key: "desktop.before", buffer: buffers.desktop.before, path: `${auditId}/cookie-banner-desktop-before.jpg` });
+  if (buffers.desktop.after) jobs.push({ key: "desktop.after", buffer: buffers.desktop.after, path: `${auditId}/cookie-banner-desktop-after.jpg` });
+  if (buffers.mobile.before) jobs.push({ key: "mobile.before", buffer: buffers.mobile.before, path: `${auditId}/cookie-banner-mobile-before.jpg` });
+  if (buffers.mobile.after) jobs.push({ key: "mobile.after", buffer: buffers.mobile.after, path: `${auditId}/cookie-banner-mobile-after.jpg` });
+
+  const results: { desktop: { before?: string; after?: string }; mobile: { before?: string; after?: string } } = { desktop: {}, mobile: {} };
+  const failedStages: string[] = [];
+  await Promise.all(jobs.map(async (job) => {
+    const { error } = await db.storage.from(bucket).upload(job.path, job.buffer, { contentType: "image/jpeg", upsert: true });
+    if (error) { failedStages.push(job.key); return; }
+    const { data } = db.storage.from(bucket).getPublicUrl(job.path);
+    const [viewport, phase] = job.key.split(".") as ["desktop" | "mobile", "before" | "after"];
+    results[viewport][phase] = data.publicUrl;
+  }));
+  return { ...results, failedStages };
+}
 ```
 
-to:
+`failedStages` (e.g. `["mobile.after"]`) replaces a blanket boolean, so a partial failure can be recorded precisely in `methodology.tests`.
+
+- [ ] Typecheck, lint, commit:
+
+```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/storage/screenshots.ts
+git add src/lib/storage/screenshots.ts
+git commit -m "feat: id-based CTA screenshot matching, precise cookie-screenshot failure reporting"
+```
+
+---
+
+### Task C3: Full pipeline wiring — assemble, sanitize, validate, persist; clear Buffers after upload
+
+**Files:** Modify `src/lib/audit/browser-scanner.ts` (`BrowserScanResult`/`scanHomepage()`), `src/lib/audit/process-audit.ts`
+
+- [ ] **Step 1: `BrowserScanResult` and `scanHomepage()` assemble `evidenceParts`**
 
 ```ts
 export interface BrowserScanResult {
   page: ExtractedPage;
   desktopScreenshot: Buffer;
   mobileScreenshot: Buffer;
-  ctaScreenshots: { index: number; buffer: Buffer }[];
+  ctaScreenshots: { evidenceId: string; buffer: Buffer }[];
   cookieBannerScreenshots: { desktop: { before?: Buffer; after?: Buffer }; mobile: { before?: Buffer; after?: Buffer } };
   evidenceParts: {
     seo: import("@/lib/audit/evidence-types").SeoEvidence;
@@ -1380,117 +1435,11 @@ export interface BrowserScanResult {
 }
 ```
 
-- [ ] **Step 2: Rewrite `scanHomepage()`'s body to assemble `evidenceParts`**
+Rewrite `scanHomepage()`'s body to thread every Checkpoint B piece together (per-viewport `extractEvidence`, `detectAndDismissCookieBanner`, `testCtaJourneysEvidence`, `extractSeoEvidence`, `attachConsoleNetworkCapture`), accumulating a `tests: TestExecutionRecord[]` array as each step completes, exactly as each Checkpoint B task specified for its own piece. Re-read the current file in full before starting — it's been touched by every B-task.
 
-Rewrite `scanHomepage()` end-to-end (all prior tasks' pieces already exist as local functions in this file — this step wires them together):
+**Rethrow vs. record-and-continue, deliberately:** `desktop-dom`, `mobile-dom`, and `seo-extraction` failures are rethrown after being recorded — without a loaded desktop page there's no audit at all. `cta-journey-desktop` failures are recorded but **not** rethrown — a broken conversion-path check shouldn't fail an otherwise-complete audit. Always push `{ id: "cta-journey-mobile", status: "skipped", reason: "single-page audit tests conversion paths once, on desktop, to bound audit runtime" }` (the schema's top-level invariant requires this whenever `mobile.ctaJourneys` is `null`).
 
-```ts
-export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult> {
-  const url = await assertSafeUrl(inputUrl);
-  const browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage"] });
-  const tests: import("@/lib/audit/evidence-types").TestExecutionRecord[] = [];
-  const desktopUserAgent = "LensiqBot/0.1 (+https://lensiq.site/bot)";
-  const mobileUserAgent = "LensiqBot/0.1 mobile (+https://lensiq.site/bot)";
-  try {
-    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1, userAgent: desktopUserAgent });
-    await secureContext(desktop);
-    const desktopPage = await desktop.newPage();
-    const desktopConsoleCapture = attachConsoleNetworkCapture(desktopPage);
-    let desktopResponse: import("playwright").Response | null = null;
-    try {
-      desktopResponse = await settle(desktopPage, url);
-      tests.push({ id: "desktop-dom", status: "passed" });
-    } catch (error) {
-      tests.push({ id: "desktop-dom", status: "failed", reason: error instanceof Error ? error.message : "Navigation failed" });
-      throw error;
-    }
-    await assertSafeUrl(desktopPage.url());
-    const cookieDesktop = await detectAndDismissCookieBanner(desktopPage);
-    tests.push({ id: "cookie-banner-desktop", status: "passed" });
-    const pageData = await extract(desktopPage);
-    pageData.cookieBanner = deriveLegacyCookieBanner(cookieDesktop.evidence);
-    const desktopEvidenceBrowser = await extractEvidence(desktopPage, "desktop");
-    desktopEvidenceBrowser.cookieBanner = cookieDesktop.evidence;
-
-    let ctaResults: { evidence: import("@/lib/audit/evidence-types").CtaJourneyEvidence; screenshot?: Buffer }[] = [];
-    try {
-      ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, pageData.ctas);
-      tests.push({ id: "cta-journey-desktop", status: "passed" });
-    } catch (error) {
-      tests.push({ id: "cta-journey-desktop", status: "failed", reason: error instanceof Error ? error.message : "CTA journey testing failed" });
-    }
-    tests.push({ id: "cta-journey-mobile", status: "skipped", reason: "single-page audit tests conversion paths once, on desktop, to bound audit runtime" });
-    pageData.ctaJourneys = deriveLegacyCtaJourneys(ctaResults.map((r) => r.evidence));
-    const ctaScreenshots = ctaResults
-      .map((result, index) => ({ index, buffer: result.screenshot }))
-      .filter((entry): entry is { index: number; buffer: Buffer } => Boolean(entry.buffer));
-
-    let seoEvidence: import("@/lib/audit/evidence-types").SeoEvidence;
-    try {
-      seoEvidence = await extractSeoEvidence(desktopPage, desktopResponse);
-      tests.push({ id: "seo-extraction", status: "passed" });
-    } catch (error) {
-      tests.push({ id: "seo-extraction", status: "failed", reason: error instanceof Error ? error.message : "SEO extraction failed" });
-      throw error;
-    }
-
-    const desktopConsoleNetwork = desktopConsoleCapture();
-    tests.push({ id: "console-network-desktop", status: "passed" });
-
-    await addAnnotations(desktopPage, pageData.ctas);
-    const desktopScreenshot = await desktopPage.screenshot({ fullPage: true, type: "jpeg", quality: 78 });
-    await desktop.close();
-
-    const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, userAgent: mobileUserAgent });
-    await secureContext(mobile);
-    const mobilePage = await mobile.newPage();
-    const mobileConsoleCapture = attachConsoleNetworkCapture(mobilePage);
-    try {
-      await settle(mobilePage, pageData.url);
-      tests.push({ id: "mobile-dom", status: "passed" });
-    } catch (error) {
-      tests.push({ id: "mobile-dom", status: "failed", reason: error instanceof Error ? error.message : "Navigation failed" });
-      throw error;
-    }
-    await assertSafeUrl(mobilePage.url());
-    const cookieMobile = await detectAndDismissCookieBanner(mobilePage);
-    tests.push({ id: "cookie-banner-mobile", status: "passed" });
-    const mobileEvidenceBrowser = await extractEvidence(mobilePage, "mobile");
-    mobileEvidenceBrowser.cookieBanner = cookieMobile.evidence;
-    const mobileConsoleNetwork = mobileConsoleCapture();
-    tests.push({ id: "console-network-mobile", status: "passed" });
-    await addAnnotations(mobilePage, pageData.ctas);
-    const mobileScreenshot = await mobilePage.screenshot({ fullPage: true, type: "jpeg", quality: 75 });
-    await mobile.close();
-
-    return {
-      page: pageData,
-      desktopScreenshot: Buffer.from(desktopScreenshot),
-      mobileScreenshot: Buffer.from(mobileScreenshot),
-      ctaScreenshots,
-      cookieBannerScreenshots: {
-        desktop: { before: cookieDesktop.beforeScreenshot, after: cookieDesktop.afterScreenshot },
-        mobile: { before: cookieMobile.beforeScreenshot, after: cookieMobile.afterScreenshot },
-      },
-      evidenceParts: {
-        seo: seoEvidence,
-        desktop: { browser: desktopEvidenceBrowser, console: desktopConsoleNetwork, ctaJourneys: ctaResults.map((r) => r.evidence) },
-        mobile: { browser: mobileEvidenceBrowser, console: mobileConsoleNetwork },
-        tests,
-        redirects: seoEvidence.pageStatus.redirectChain,
-        userAgentDesktop: desktopUserAgent,
-        userAgentMobile: mobileUserAgent,
-      },
-    };
-  } finally {
-    await browser.close();
-  }
-}
-```
-
-Add the missing imports at the top of `browser-scanner.ts`: `import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";` (if not already added in Tasks 6/7).
-
-- [ ] **Step 3: Rewrite `process-audit.ts` to assemble, sanitize, validate, and persist `AuditEvidenceV2`**
+- [ ] **Step 2: `process-audit.ts` — assemble, sanitize, validate, persist, clear Buffers**
 
 ```ts
 import { claimNextAudit, completeAudit, failAudit, saveScan } from "@/lib/db/audits";
@@ -1499,7 +1448,8 @@ import { runLighthouse, buildAutomatedAccessibilityChecks } from "@/lib/audit/li
 import { generateReport } from "@/lib/audit/generate-report";
 import { uploadCtaScreenshots, uploadCookieBannerScreenshots, uploadScreenshots } from "@/lib/storage/screenshots";
 import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
-import { sanitizeText } from "@/lib/audit/evidence-sanitize";
+import { sanitizeEvidenceV2, sanitizeText } from "@/lib/audit/evidence-sanitize";
+import { deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
 import type { AuditEvidenceV2, TestExecutionRecord } from "@/lib/audit/evidence-types";
 
 export async function processNextAudit() {
@@ -1508,28 +1458,41 @@ export async function processNextAudit() {
   const startedAt = new Date().toISOString();
   try {
     const browserResult = await scanHomepage(audit.normalizedUrl);
-    const { metrics, evidence: performanceEvidence } = await runLighthouse(browserResult.page.url);
+    const { metrics, evidence: performanceEvidence, lhr } = await runLighthouse(browserResult.page.url);
     const screenshots = await uploadScreenshots(audit.id, browserResult.desktopScreenshot, browserResult.mobileScreenshot);
     browserResult.page.desktopScreenshotPath = screenshots.desktop;
     browserResult.page.mobileScreenshotPath = screenshots.mobile;
+
     const ctaScreenshots = await uploadCtaScreenshots(audit.id, browserResult.ctaScreenshots);
-    for (const { index, path } of ctaScreenshots) browserResult.page.ctaJourneys[index].screenshotPath = path;
-    for (const { index, path } of ctaScreenshots) browserResult.evidenceParts.desktop.ctaJourneys[index].screenshotRef = path;
+    for (const { evidenceId, path } of ctaScreenshots) {
+      const journey = browserResult.evidenceParts.desktop.ctaJourneys.find((j) => j.evidenceId === evidenceId);
+      if (journey) journey.screenshotRef = path;
+    }
+    // Legacy ctaJourneys are re-derived AFTER screenshot refs are attached to the v2
+    // records — the legacy shape is always a projection of the v2 measurement, matched
+    // by evidenceId, never a second independent computation or an index-based join.
+    browserResult.page.ctaJourneys = deriveLegacyCtaJourneys(browserResult.evidenceParts.desktop.ctaJourneys);
+    // Buffers are no longer needed once uploaded — drop references so nothing
+    // downstream could accidentally serialize them into JSON/DB.
+    browserResult.ctaScreenshots.forEach((entry) => { (entry as { buffer?: Buffer }).buffer = undefined; });
 
     const tests: TestExecutionRecord[] = [...browserResult.evidenceParts.tests, { id: "lighthouse-lab", status: "passed" }];
     const cookieUpload = await uploadCookieBannerScreenshots(audit.id, browserResult.cookieBannerScreenshots);
-    if (cookieUpload.uploadFailed) {
-      tests.push({ id: "cookie-banner-screenshot-upload", status: "failed", reason: sanitizeText("One or more cookie banner screenshots failed to upload", 300) });
-    } else {
-      tests.push({ id: "cookie-banner-screenshot-upload", status: "passed" });
-    }
+    tests.push(
+      cookieUpload.failedStages.length > 0
+        ? { id: "cookie-banner-screenshot-upload", status: "failed", reason: sanitizeText(`Upload failed for: ${cookieUpload.failedStages.join(", ")}`, 300) }
+        : { id: "cookie-banner-screenshot-upload", status: "passed" },
+    );
     browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.desktop.before;
     browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.desktop.after;
     browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.mobile.before;
     browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.mobile.after;
+    browserResult.cookieBannerScreenshots.desktop.before = undefined;
+    browserResult.cookieBannerScreenshots.desktop.after = undefined;
+    browserResult.cookieBannerScreenshots.mobile.before = undefined;
+    browserResult.cookieBannerScreenshots.mobile.after = undefined;
 
-    const lhr = metrics.raw as import("lighthouse").Result;
-    const evidence: AuditEvidenceV2 = {
+    const evidenceUnsanitized: AuditEvidenceV2 = {
       contractVersion: 2,
       methodology: {
         contractVersion: 2,
@@ -1541,7 +1504,7 @@ export async function processNextAudit() {
         scope: "single-page",
         viewports: { desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 } },
         userAgent: { desktop: browserResult.evidenceParts.userAgentDesktop, mobile: browserResult.evidenceParts.userAgentMobile },
-        tool: { lighthouseVersion: lhr.lighthouseVersion },
+        tool: { lighthouseVersion: performanceEvidence.lab.lighthouseVersion },
         redirects: browserResult.evidenceParts.redirects,
         tests,
         limitations: ["single page only, not a site-wide crawl", "field performance data not assessed — no CrUX integration this release"],
@@ -1552,17 +1515,28 @@ export async function processNextAudit() {
       performance: performanceEvidence,
       accessibility: {
         standard: "WCAG 2.2",
-        automatedChecks: buildAutomatedAccessibilityChecks(lhr),
-        browserObservations: {
-          imagesWithoutAlt: browserResult.evidenceParts.desktop.browser.images.filter((img) => !img.hasAlt).length,
-          formInputsWithoutLabel: browserResult.evidenceParts.desktop.browser.forms.flatMap((f) => f.inputs).filter((i) => !i.hasLabel).length,
-          landmarksPresent: Object.entries(browserResult.evidenceParts.desktop.browser.landmarks).filter(([, present]) => present).map(([key]) => key),
+        desktop: {
+          automatedChecks: buildAutomatedAccessibilityChecks(lhr),
+          browserObservations: {
+            imagesWithoutAlt: browserResult.evidenceParts.desktop.browser.images.filter((img) => !img.hasAlt).length,
+            formInputsWithoutLabel: browserResult.evidenceParts.desktop.browser.forms.flatMap((f) => f.inputs).filter((i) => !i.hasLabel).length,
+            landmarksPresent: Object.entries(browserResult.evidenceParts.desktop.browser.landmarks).filter(([, present]) => present).map(([key]) => key),
+          },
+        },
+        mobile: {
+          automatedChecks: { source: "lighthouse", status: "not-assessed", score: null, failedAudits: [] },
+          browserObservations: {
+            imagesWithoutAlt: browserResult.evidenceParts.mobile.browser.images.filter((img) => !img.hasAlt).length,
+            formInputsWithoutLabel: browserResult.evidenceParts.mobile.browser.forms.flatMap((f) => f.inputs).filter((i) => !i.hasLabel).length,
+            landmarksPresent: Object.entries(browserResult.evidenceParts.mobile.browser.landmarks).filter(([, present]) => present).map(([key]) => key),
+          },
         },
         requiresHumanVerification: ["keyboard trap testing", "screen reader announcement correctness", "meaningful reading order", "color contrast on non-text UI", "focus order and visibility"],
       },
     };
 
-    browserResult.page.evidence = AuditEvidenceV2Schema.parse(evidence);
+    const sanitized = sanitizeEvidenceV2(evidenceUnsanitized);
+    browserResult.page.evidence = AuditEvidenceV2Schema.parse(sanitized);
     await saveScan(audit.id, browserResult.page, metrics, screenshots);
     const report = await generateReport(browserResult.page, metrics, audit.pageGoal);
     await completeAudit(audit.id, report);
@@ -1574,34 +1548,21 @@ export async function processNextAudit() {
 }
 ```
 
-Note: `AuditEvidenceV2Schema.parse(evidence)` throwing (malformed evidence) is caught by the existing outer `try/catch`, which already calls `failAudit` — exactly the "audit fails loudly rather than persisting invalid evidence" requirement, with no new error-handling branch needed.
+`AuditEvidenceV2Schema.parse()` throwing (malformed/invariant-violating evidence) is caught by the existing outer `try/catch`, which already calls `failAudit` — no new error-handling branch needed. A `blocked-unsafe-redirect` CTA outcome, by contrast, is a **normal, valid** evidence record (Task B3 never throws for it), so it does **not** reach this catch block at all — the audit completes.
 
-- [ ] **Step 4: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts src/lib/audit/process-audit.ts`
-Expected: no errors. This step will likely surface several small mismatches between this task's assumptions and the exact prior tasks' code (e.g., exact variable names) — reconcile them against what Tasks 5-12 actually left in the file, not this step's prose.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
-git add src/lib/audit/browser-scanner.ts src/lib/audit/process-audit.ts src/lib/storage/screenshots.ts
-git commit -m "feat: assemble and persist AuditEvidenceV2 through the worker pipeline"
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/audit/browser-scanner.ts src/lib/audit/process-audit.ts
+git add src/lib/audit/browser-scanner.ts src/lib/audit/process-audit.ts
+git commit -m "feat: assemble, sanitize, validate, and persist AuditEvidenceV2 through the worker pipeline"
 ```
 
 ---
 
-### Task 14: Read-path validation and sanitized logging in `db/audits.ts`
+### Task C4: Read-path validation
 
-**Files:**
-- Modify: `src/lib/db/audits.ts`
-
-**Interfaces:**
-- Consumes: `AuditEvidenceV2Schema` (Task 3).
-- Produces: `getAudit()` and `getOwnedAuditFull()` populate `page.evidence` only from a `safeParse()` success; otherwise `undefined` plus a sanitized log line.
-
-- [ ] **Step 1: Add a shared helper**
-
-Add near the top of `db/audits.ts`:
+**Files:** Modify `src/lib/db/audits.ts`
 
 ```ts
 import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
@@ -1615,9 +1576,7 @@ function parseEvidence(auditId: string, raw: unknown): import("@/lib/audit/evide
 }
 ```
 
-- [ ] **Step 2: Wire it into `getAudit()` and `getOwnedAuditFull()`**
-
-In both functions, where `result.page` is built from `page.extracted_json as ExtractedPage`, add one line right after the cast to attach the validated (or cleared) evidence:
+Wire into both `getAudit()` and `getOwnedAuditFull()` right after `result.page = {...}` is built:
 
 ```ts
 if (page) {
@@ -1626,72 +1585,44 @@ if (page) {
 }
 ```
 
-(This replaces the existing two lines that set `result.page = {...}` in both `getAudit` (around line 33) and `getOwnedAuditFull` (around line 73) — same structure, one added line each.)
-
-- [ ] **Step 3: Typecheck and lint**
-
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/db/audits.ts`
-Expected: no errors.
-
-- [ ] **Step 4: Commit**
+- [ ] Typecheck, lint, commit:
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/lib/db/audits.ts
 git add src/lib/db/audits.ts
 git commit -m "feat: safe-parse evidence on read, degrade invalid/legacy rows to undefined"
 ```
 
 ---
 
-### Task 15: Report-copy corrections
+### Task C5: Report-copy corrections
 
-**Files:**
-- Modify: `src/components/report/report-view.tsx`
-
-**Interfaces:**
-- Consumes: `AuditRecord.page.evidence` (optional).
+**Files:** Modify `src/components/report/report-view.tsx`
 
 - [ ] **Step 1: CTA copy gating in `buildWalkthrough()`**
 
-Replace:
-
 ```ts
 function buildWalkthrough(page: ExtractedPage): string[] {
   const heading = page.headings.find((h) => h.level === 1)?.text || page.title;
-  const steps: string[] = [`I land on the page and the first thing I read is “${heading}.”`];
+  const steps: string[] = [`I land on the page and the first thing I read is "${heading}."`];
   const foldText = page.aboveFold.text.trim();
-  if (foldText) steps.push(`Just below it: “${foldText.slice(0, 150)}${foldText.length > 150 ? "…" : ""}”`);
-  if (page.cookieBanner.detected) steps.push("Before I can read further, a cookie consent banner asks me to decide.");
-  for (const journey of page.ctaJourneys.slice(0, 3)) {
-    steps.push(journey.sameOrigin ? `I click “${journey.text}” — ${journey.outcome.toLowerCase()}.` : `I click “${journey.text}” — it sends me to an external site.`);
-  }
-  return steps;
-}
-```
-
-with:
-
-```ts
-function buildWalkthrough(page: ExtractedPage): string[] {
-  const heading = page.headings.find((h) => h.level === 1)?.text || page.title;
-  const steps: string[] = [`I land on the page and the first thing I read is “${heading}.”`];
-  const foldText = page.aboveFold.text.trim();
-  if (foldText) steps.push(`Just below it: “${foldText.slice(0, 150)}${foldText.length > 150 ? "…" : ""}”`);
+  if (foldText) steps.push(`Just below it: "${foldText.slice(0, 150)}${foldText.length > 150 ? "…" : ""}"`);
   if (page.cookieBanner.detected) steps.push("Before I can read further, a cookie consent banner asks me to decide.");
 
   const evidenceJourneys = page.evidence?.desktop.ctaJourneys;
   if (evidenceJourneys) {
     for (const journey of evidenceJourneys.slice(0, 3)) {
       if (journey.navigationAttempted && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
-        steps.push(`I click “${journey.text}” — it ${journey.outcome === "redirected" ? "redirects and loads" : "loads"}.`);
+        steps.push(`I click "${journey.text}" — it ${journey.outcome === "redirected" ? "redirects and loads" : "loads"}.`);
       } else if (journey.outcome === "external-not-visited") {
-        steps.push(`I see “${journey.text}” — it points to an external site, not visited in this audit.`);
+        steps.push(`I see "${journey.text}" — it points to an external site, not visited in this audit.`);
       } else {
-        steps.push(`I see “${journey.text}” — not tested in this audit.`);
+        steps.push(`I see "${journey.text}" — not tested in this audit.`);
       }
     }
   } else {
     for (const journey of page.ctaJourneys.slice(0, 3)) {
-      steps.push(journey.sameOrigin ? `I click “${journey.text}” — ${journey.outcome.toLowerCase()}.` : `I click “${journey.text}” — it sends me to an external site.`);
+      steps.push(journey.sameOrigin ? `I click "${journey.text}" — ${journey.outcome.toLowerCase()}.` : `I click "${journey.text}" — it sends me to an external site.`);
     }
   }
   return steps;
@@ -1699,14 +1630,6 @@ function buildWalkthrough(page: ExtractedPage): string[] {
 ```
 
 - [ ] **Step 2: Responsiveness metric label split**
-
-Replace the technical-snapshot metrics row:
-
-```tsx
-<div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[["LCP", metric(metrics.lcp, "ms")], ["CLS", metric(metrics.cls)], ["TBT / INP", metric(metrics.inpOrTbt, "ms")], ["TTFB", metric(metrics.ttfb, "ms")]].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b py-5"><span className="text-xs text-muted-foreground">{label}</span><strong className="font-mono">{value}</strong></div>)}</div>
-```
-
-with:
 
 ```tsx
 <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{[
@@ -1719,70 +1642,79 @@ with:
 ].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b py-5"><span className="text-xs text-muted-foreground">{label}</span><strong className="font-mono">{value}</strong></div>)}</div>
 ```
 
-- [ ] **Step 3: Typecheck and lint**
+Never relabel old `inpOrTbt` data as certain TBT — the legacy branch keeps the honest "source not recorded" framing.
 
-Run: `docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/components/report/report-view.tsx`
-Expected: no errors. `demoAudit` (no `evidence` field) must still render via the `else`/legacy-label branches in both changes — confirmed structurally by the optional-chaining/ternary logic above, verified live in Task 16.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Typecheck, lint, commit**
 
 ```bash
+docker-compose run --rm web npx tsc --noEmit && docker-compose run --rm web npx eslint src/components/report/report-view.tsx
 git add src/components/report/report-view.tsx
 git commit -m "fix: gate CTA copy on real navigation, split TBT/INP responsiveness label"
 ```
 
+- [ ] **Checkpoint C self-review:** `raw_lighthouse_json` no longer carries the full LHR; Lighthouse test conditions are read from `lhr.configSettings`, not hardcoded; accessibility evidence is genuinely per-viewport (mobile `automatedChecks.status === "not-assessed"` always, `browserObservations` real on both); CTA screenshot refs are matched by `evidenceId`; Buffers are cleared after upload; legacy fields still derive from v2 evidence only. Fix anything missing before Checkpoint D.
+
 ---
 
-### Task 16: Live verification against a controlled fixture
+## Checkpoint D — Live fixture, SSRF proof, privacy inspection, cleanup
 
-**Files:** none (verification only — no code changes unless a defect is found, in which case stop and fix per the standing "if a security-relevant test fails, stop and document before cleaning up" rule).
+**No plan-time code** — executed live.
 
 - [ ] **Step 1: Full local build gate**
 
 ```bash
 docker-compose run --rm web npx tsc --noEmit
 docker-compose run --rm web npx eslint .
+docker-compose run --rm web npm test
 docker-compose run --rm web npm run build
 ```
-Expected: all three pass clean. If `next build` regenerates `next-env.d.ts`, revert it (`git checkout -- next-env.d.ts`) as in prior sprints — it's an auto-generated artifact, not a real change.
+Revert `next-env.d.ts` if `next build` regenerates it (known benign artifact from prior sprints).
 
-- [ ] **Step 2: Deploy the temporary fixture**
+- [ ] **Step 2: Deploy an isolated fixture with real routes**
 
-Create a minimal standalone static HTML page containing every element the spec's Testing plan requires (different desktop/mobile CSS, a real cookie banner with a dismiss button, one same-origin CTA that 302-redirects once, one external CTA, one CTA (or the page's own load) that redirects to a private/link-local address, valid + one malformed JSON-LD block, canonical/robots/hreflang tags, a deliberate `console.error(...)`, an `<img>` pointing at a guaranteed-404 path, one labeled form and one unlabeled form). Add `<meta name="robots" content="noindex, nofollow">`. Deploy it as its own throwaway Vercel project (`vercel deploy` from a scratch directory, not linked to the Lensiq project) so the temporary URL and any cleanup are fully isolated from production. Record the URL only in a local temp file (e.g. `/private/tmp/.../fixture-url.txt`), never in a committed file.
+Build a minimal Next.js (or plain Node) app in a scratch directory — not this repo, no Git linkage — with actual server routes, not static HTML, since a real 302 requires a server response:
+- `/` — homepage with distinct desktop/mobile CSS, a real cookie-consent banner + dismiss button, a form with labeled inputs and a form with an unlabeled input, valid JSON-LD plus one malformed block, canonical/robots/hreflang/OG tags, an inline script issuing `console.error(...)` and a `fetch()` to a guaranteed-404 path, and three CTAs: one to `/go/redirect` (same-origin, 302), one to `/go/private` (302 to a private/link-local address), one to an external site.
+- `/go/redirect` — a route handler issuing a real `302` to `/thanks`.
+- `/go/private` — a route handler issuing a real `302 Location:` header pointing at a private/link-local address (e.g. `http://169.254.169.254/` or `http://10.255.255.1/`).
+- `/thanks` — a simple landing page for the redirect target.
+
+Deploy via `vercel deploy` (no `--prod`, no linked Git repo, no env vars, no custom domain) from that scratch directory; record the resulting `*.vercel.app` URL only in a local temp file, never committed.
 
 - [ ] **Step 3: Run a real audit through the actual worker pipeline**
 
-Using the live Docker dev stack (`docker-compose up -d web worker`), create a real audit against the fixture URL through the legitimate app path (`POST /api/audits` with a real authenticated session, or `createAudit()` directly if that's the established pattern from the prior sprint — match whatever the ACL sprint's Task 9 protocol used, since it's already proven safe), mark it paid via `markAuditPaid()` if needed to let the worker pick it up, and let `processNextAudit()` run to completion.
+Using the live Docker dev stack, create a real audit against the fixture URL through the legitimate app path (matching whatever the prior sprint's Task 9 protocol used for creating/paying a test audit — no raw SQL), and let `processNextAudit()` run to completion.
 
-- [ ] **Step 4: Verify every final criterion from the design spec**
+- [ ] **Step 4: Verify every invariant and correction live**
 
-Query the completed audit (via the app's own `getOwnedAuditFull`/`getAudit`, not raw SQL) and confirm:
-- `page.evidence.desktop` and `page.evidence.mobile` browser evidence differ in a way that proves independent extraction (not identical objects).
-- `cookieBanner.detected`/`.dismissed` are both `true` (fixture has a real, dismissible banner) and `blockingStatus` is `"verified"` with a boolean `blocking` value, not `null`, since the check ran.
-- The redirecting same-origin CTA has `outcome: "redirected"`, `redirectCount >= 1`.
-- The external CTA has `outcome: "external-not-visited"`, `navigationAttempted: false`.
-- The private-address redirect case shows the corresponding request blocked (either the whole CTA journey/page load fails with a network error attributable to `assertSafeUrl`, or the worker itself throws — confirm via worker logs, not by guessing) — **this is the one check where, per the standing rule, if it does NOT show the block, stop and document before touching anything else; do not clean up the fixture or the audit row until this is resolved.**
-- `seo.jsonLd` has one entry with `parsed: true` and one with `parsed: false, parseError` set; no entry contains the raw script text, only `excerptHash`/`sanitizedExcerpt`.
-- `performance.lab.tbt` is a number, `performance.field.status === "not-assessed"`, `performance.field.inp === null`.
-- `accessibility.requiresHumanVerification` is present and non-empty; nothing in the persisted data or a rendered report page claims "WCAG compliant" or an automatic conformance level.
-- `AuditEvidenceV2Schema.parse()` succeeded (implied by the row existing with `status: "completed"` and no validation-driven `failAudit`) — additionally confirm `safeParse()` degrades gracefully by round-tripping a deliberately corrupted copy of the same JSON through `AuditEvidenceV2Schema.safeParse()` in a throwaway script (not against the live row).
+Load the completed audit via `getOwnedAuditFull`/`getAudit` (never raw SQL) and confirm:
+- Every `CtaJourneyEvidence`/`OverlapCandidate`/`SmallTapTargetCandidate`/console/network/`JsonLdEvidence`/hreflang/OG entry has a non-empty `evidenceId`, and re-running `makeEvidenceId` with the same inputs reproduces the same ids.
+- The CTA to `/go/private` has `outcome: "blocked-unsafe-redirect"`, `navigationAttempted: true`, a generic `error` message, and **no private IP address anywhere in the persisted row** (grep the serialized evidence) — and the audit still completed (`status: "completed"`, not `"failed"`). **If the audit failed because of this CTA, stop and document before doing anything else — that is the bug this correction exists to prevent, not an acceptable outcome.**
+- The `/go/redirect` CTA has `outcome: "redirected"`, `redirectCount >= 1`, `finalUrl` set.
+- `cookieBanner.detected`/`.dismissed` both `true`; `blockingStatus` is `"verified"` with a real boolean `blocking`; before/after screenshot refs are real Storage URLs, not local paths, not Buffers.
+- `overlapCandidates`/`smallTapTargetCandidates` entries (if any) have `status: "inferred"`, never `"verified"`, while `overlapCandidatesStatus`/`smallTapTargetCandidatesStatus` (the scan-ran indicator) is `"verified"`.
+- `jsonLd` has one `parsed: true` and one `parsed: false` entry; neither contains the raw script; `contentMatchStatus` is `"inferred"` or `"not-assessed"`, never `"verified"`.
+- `accessibility.mobile.automatedChecks.status === "not-assessed"` and `score === null`, while `accessibility.desktop.automatedChecks.status === "verified"` with a real score; `accessibility.mobile.browserObservations` has real (non-placeholder) counts from the mobile scan.
+- `performance.testConditions` reflects real `lhr.configSettings` values, not hardcoded strings.
+- `audit_metrics.raw_lighthouse_json` (inspect via the app's own read path) is the small sanitized subset, not a full Lighthouse result.
+- Nothing in the persisted evidence or a rendered report page claims "WCAG compliant" or an automatic conformance level.
+- A deliberately-corrupted copy of the persisted evidence, run through `AuditEvidenceV2Schema.safeParse()` in a throwaway script, degrades cleanly (`success: false`, no throw).
 
-- [ ] **Step 5: Regression-check `/audits/demo` and legacy behavior**
+- [ ] **Step 5: Regression-check `/audits/demo`**
 
-Via a real browser (Playwright), visit `/audits/demo` and confirm it renders exactly as before (single legacy responsiveness label, existing cookie-banner/CTA copy) — `demoAudit` has no `evidence` field, so this also exercises the `else` branches added in Task 15.
+Via a real browser, confirm `/audits/demo` renders exactly as before — `demoAudit` has no `evidence`, exercising the fallback branches from Task C5.
 
-- [ ] **Step 6: Cleanup**
+- [ ] **Step 6: Full cleanup**
 
-In this order: delete the fixture audit row (via the app's legitimate delete path if one exists, or note if none exists and it must simply be left as a clearly-labeled test row — do not invent a raw-SQL delete), tear down the throwaway Vercel deployment (`vercel remove` on that scratch project), delete the local temp file tracking the fixture URL, confirm `git status` shows a clean working tree with no stray screenshots/logs, and confirm no credential, token, or the fixture URL itself was committed anywhere.
+In order: delete the audit row (cascades to `audit_pages`/`audit_metrics`/`audit_reports` via the existing `on delete cascade`, through the Supabase admin JS client, not raw SQL) → delete every uploaded Storage object for that audit id (desktop/mobile screenshots, CTA screenshots, cookie-banner before/after screenshots — list the bucket prefix and remove them explicitly) → tear down the throwaway Vercel project (`vercel remove <project> --yes`) → delete the local temp file tracking the fixture URL → confirm `git status` clean, no stray files, no credential/token/fixture-URL committed anywhere.
 
-- [ ] **Step 7: Final commit (if any cleanup touched tracked files)**
+- [ ] **Step 7: Open the PR**
 
-Only if Step 6 modified any tracked file (it shouldn't, since the fixture lives outside this repo) — otherwise this step is a no-op and the branch is ready for the closeout/PR conversation.
-
----
+```bash
+git push -u origin feature/evidence-contract-v2
+gh pr create --title "Evidence Contract v2 — verifiable, honest audit evidence" --body "..."
+```
+PR body covers: the evidence contract (types, stable IDs, sanitizer, Zod invariants, legacy derivation), the scanner/pipeline changes, the three approved report-copy corrections, the committed test suite, and the live-fixture verification results (including the SSRF-block proof and the `raw_lighthouse_json` privacy inspection). **Do not merge** — stops here for review.
 
 ## Self-review notes
 
-- **Spec coverage:** every named correction from the second design-review round (null-not-false pairs, geometric candidates vs. findings, Zod validation, centralized sanitization, future-compatible field-performance shape, cookie-screenshot lifecycle, single-source-of-truth derivation, corrected fixture strategy, typed test execution, accessibility boundary language) has a task above. The three report-copy corrections (Task 15) and the preflight confirmation (already recorded in the spec, not a code task) are both covered.
-- **Placeholder scan:** no task above says "add appropriate error handling" or defers real code to a later step without showing it.
-- **Type consistency:** `AuditEvidenceV2`/`BrowserEvidence`/`CtaJourneyEvidence`/etc. field names are used identically across Tasks 1, 3-4, 5-13, and 15 — cross-checked against Task 1's exact interface definitions while drafting every later task.
+Every correction from this round — stable `evidenceId` on every repeatable record (never array index), `superRefine` invariants (blocking/status pairing, outcome-conditional requirements, field-performance availability, mobile-skip cross-reference, ISO timestamps, HTTP status ranges, positive/non-negative numerics), a whole-object `sanitizeEvidenceV2` ahead of Zod parse, sanitize-before-hash for JSON-LD, a committed `node:test` suite (sanitization, ID determinism/uniqueness, every invariant, legacy derivation, invalid-evidence degradation, id-based CTA↔screenshot mapping, no-Buffer serialization), the `raw_lighthouse_json` privacy fix, `inferred`-not-`verified` semantics for geometric conclusions and JSON-LD content-match, genuinely per-viewport accessibility evidence, `blocked-unsafe-redirect` as a non-fatal typed outcome with no raw private address ever persisted, a screenshot lifecycle with size caps/Buffer-clearing/precise partial-failure reporting/detected-only capture, a real-routes isolated fixture with full Storage cleanup, and real-`configSettings`-sourced performance methodology — has a concrete task above. Type names/fields are used identically across Checkpoints A-D.
