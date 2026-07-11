@@ -253,7 +253,9 @@ async function countRedirects(response: Response | null): Promise<number> {
 }
 
 function isSafetyBlock(message: string): boolean {
-  return /blockedbyclient|private network|resolves to a private|cannot be audited|could not be resolved/i.test(message);
+  // Chromium's actual abort reason is "net::ERR_BLOCKED_BY_CLIENT" (underscored) — match
+  // it with a permissive separator so both that and a hypothetical unspaced variant hit.
+  return /blocked.by.client|private network|resolves to a private|cannot be audited|could not be resolved/i.test(message);
 }
 
 async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, ctas: ExtractedPage["ctas"]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
