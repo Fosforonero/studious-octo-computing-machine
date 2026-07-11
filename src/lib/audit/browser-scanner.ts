@@ -1,10 +1,21 @@
 import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import { assertSafeUrl } from "@/lib/security/url";
 import type { ExtractedPage } from "@/lib/audit/types";
-import type { BrowserEvidence, CookieBannerEvidence, ConsoleNetworkEvidence, CtaJourneyEvidence, CtaOutcome, EvidenceStatus, JsonLdEvidence, SeoEvidence, TestExecutionRecord } from "@/lib/audit/evidence-types";
+import type { BrowserEvidence, CookieBannerEvidence, ConsoleNetworkEvidence, CtaInteraction, CtaJourneyEvidence, CtaOutcome, EvidenceStatus, JsonLdEvidence, SeoEvidence, TestExecutionRecord } from "@/lib/audit/evidence-types";
 import { hashContent, redactSensitivePatterns, sanitizeText, sanitizeUrl } from "@/lib/audit/evidence-sanitize";
 import { dedupeEvidenceIds, makeEvidenceId } from "@/lib/audit/evidence-id";
 import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
+
+export function clearScreenshotBuffer<T extends { buffer?: Buffer }>(entry: T): void {
+  entry.buffer = undefined;
+}
+
+export function clearCookieBannerBuffers(screenshots: BrowserScanResult["cookieBannerScreenshots"]): void {
+  screenshots.desktop.before = undefined;
+  screenshots.desktop.after = undefined;
+  screenshots.mobile.before = undefined;
+  screenshots.mobile.after = undefined;
+}
 
 export interface BrowserScanResult {
   page: ExtractedPage;
@@ -215,17 +226,23 @@ async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: Coo
   let beforeScreenshot: Buffer | undefined;
   try { beforeScreenshot = capScreenshot(Buffer.from(await page.screenshot({ type: "jpeg", quality: 70 }))); } catch { /* screenshot best-effort */ }
 
+  // A click that doesn't throw only proves the click was dispatched, not that it actually
+  // closed anything (a decoy "Accept" that toggles unrelated state would otherwise be
+  // reported as a false dismissed=true). Verify the banner is genuinely gone/hidden after
+  // each attempt, and keep trying other candidate buttons if it isn't.
+  let dismissAttempted = false;
   let dismissed = false;
   for (const pattern of COOKIE_CONSENT_PATTERNS) {
+    if (dismissed) break;
     const button = page.getByRole("button", { name: pattern }).first();
     try {
       if (await button.isVisible({ timeout: 400 })) {
         await button.click({ timeout: 1500 });
+        dismissAttempted = true;
         await page.waitForTimeout(400);
-        dismissed = true;
-        break;
+        dismissed = !(await isCookieBannerVisible(page));
       }
-    } catch { /* pattern not present, try the next one */ }
+    } catch { /* pattern not present or not clickable, try the next one */ }
   }
 
   let afterScreenshot: Buffer | undefined;
@@ -234,7 +251,7 @@ async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: Coo
   return {
     evidence: {
       detected: true,
-      dismissAttempted: true,
+      dismissAttempted,
       dismissed,
       blocking: detection.blocking,
       blockingStatus: detection.blocking === null ? "not-assessed" : "verified",
@@ -243,6 +260,17 @@ async function detectAndDismissCookieBanner(page: Page): Promise<{ evidence: Coo
     beforeScreenshot,
     afterScreenshot,
   };
+}
+
+async function isCookieBannerVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const candidates = [...document.querySelectorAll("[class*=cookie i],[id*=cookie i],[class*=consent i],[id*=consent i],[role=dialog]")];
+    return candidates.some((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    });
+  });
 }
 
 async function countRedirects(response: Response | null): Promise<number> {
@@ -258,75 +286,292 @@ function isSafetyBlock(message: string): boolean {
   return /blocked.by.client|private network|resolves to a private|cannot be audited|could not be resolved/i.test(message);
 }
 
-async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, ctas: ExtractedPage["ctas"]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
-  const source = new URL(sourceUrl);
-  const httpCandidates = ctas.filter((cta) => { try { return ["http:", "https:"].includes(new URL(cta.href, source).protocol); } catch { return false; } });
-  const invalidCandidates = ctas.filter((cta) => !httpCandidates.includes(cta));
-  const tested = httpCandidates.slice(0, 5);
-  const overLimit = httpCandidates.slice(5);
+interface RawCtaCandidate {
+  tag: string;
+  role: string | null;
+  text: string;
+  type: string | null;
+  href: string;
+  stateChanging: boolean;
+  groupKey: string;
+  groupIndex: number;
+  groupSize: number;
+}
 
-  const testedResults = await Promise.all(tested.map(async (cta) => {
-    const destination = new URL(cta.href, source);
-    const sameOrigin = destination.origin === source.origin;
-    const evidenceId = makeEvidenceId("cta", destination.toString(), cta.text);
-    if (!sameOrigin) {
-      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } };
-    }
-    const probe = await context.newPage();
-    // Defense in depth beyond the context-level route guard: validate every redirect
-    // response's Location header the moment its headers arrive — BEFORE Chrome has a
-    // chance to dispatch the follow-up request — and force-close the page if it points
-    // somewhere unsafe. This is what actually guarantees "blocked before the request"
-    // for a redirect hop, rather than depending on route-interception timing that can
-    // otherwise let the connection attempt hang until the navigation timeout.
-    let blockedByGuard = false;
-    probe.on("response", (response) => {
-      if (blockedByGuard) return;
-      const status = response.status();
-      if (status < 300 || status >= 400) return;
-      const location = response.headers()["location"];
-      if (!location) return;
-      let target: URL;
-      try { target = new URL(location, response.url()); } catch { return; }
-      assertSafeUrl(target.toString()).catch(() => {
-        blockedByGuard = true;
-        probe.close().catch(() => { /* page may already be closing */ });
-      });
+// Runs on the already-settled, cookie-dismissed desktop page. Every element that could
+// plausibly be a conversion action — not just ones matching marketing-copy keywords, so a
+// bare `<button type="submit">Save</button>` is still captured and correctly routed to
+// skipped-potentially-state-changing rather than silently dropped.
+async function extractCtaCandidates(page: Page): Promise<RawCtaCandidate[]> {
+  return page.evaluate(() => {
+    const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+    const visible = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const STATE_CHANGING = /\b(submit|checkout|buy now|purchase|pay|delete|remove|logout|log out|sign out|unsubscribe|cancel|place order|confirm order|delete account)\b/i;
+    const CTA_KEYWORDS = /get started|start|buy|book|contact|demo|try|sign up|subscribe|learn more|scopri|inizia|contatt|acquista|prova|save|accept/i;
+
+    const nodes = [...document.querySelectorAll('button,a[href],input[type="submit"],input[type="button"],[role="button"]')].filter(visible);
+    const raw = nodes
+      .map((node) => {
+        const tag = node.tagName.toLowerCase();
+        const role = node.getAttribute("role");
+        const isInput = tag === "input";
+        const text = isInput ? clean((node as HTMLInputElement).value) : clean(node.textContent);
+        const explicitType = node.getAttribute("type");
+        const insideForm = Boolean(node.closest("form"));
+        const resolvedType = isInput ? (explicitType ?? "text") : tag === "button" ? (explicitType ?? (insideForm ? "submit" : "button")) : null;
+        const isFormSubmit = resolvedType === "submit" && insideForm;
+        const href = node instanceof HTMLAnchorElement ? node.href : "";
+        const stateChanging = isFormSubmit || STATE_CHANGING.test(text);
+        const isCtaLike = tag === "button" || tag === "input" || role === "button" || CTA_KEYWORDS.test(text) || isFormSubmit;
+        return { tag, role, text, type: resolvedType, href, stateChanging, isCtaLike };
+      })
+      .filter((c) => c.isCtaLike && c.text)
+      .slice(0, 50);
+
+    const counts = new Map<string, number>();
+    for (const c of raw) { const key = `${c.tag}::${c.text}`; counts.set(key, (counts.get(key) ?? 0) + 1); }
+    const running = new Map<string, number>();
+    return raw.map((c) => {
+      const groupKey = `${c.tag}::${c.text}`;
+      const groupIndex = running.get(groupKey) ?? 0;
+      running.set(groupKey, groupIndex + 1);
+      return { tag: c.tag, role: c.role, text: c.text, type: c.type, href: c.href, stateChanging: c.stateChanging, groupKey, groupIndex, groupSize: counts.get(groupKey) ?? 1 };
     });
-    try {
-      const response = await probe.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
-      await assertSafeUrl(probe.url());
-      const redirectCount = await countRedirects(response);
-      const screenshot = response?.ok() ? Buffer.from(await probe.screenshot({ type: "jpeg", quality: 70 })) : undefined;
-      const outcome: CtaOutcome = !response ? "network-error" : !response.ok() ? "http-error" : redirectCount > 0 ? "redirected" : "navigated";
-      return {
-        evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, finalUrl: probe.url(), redirectCount, httpStatus: response?.status(), outcome, error: outcome === "network-error" ? "No response received" : undefined },
-        screenshot,
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not load";
-      // A redirect toward a private/unsafe address is a deliberate protection firing,
-      // not a generic transport failure — record it distinctly, with a fixed generic
-      // message so the real (possibly private) address is never persisted.
-      if (blockedByGuard || isSafetyBlock(message)) {
-        return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "blocked-unsafe-redirect" as const, error: "Blocked: navigation to a private/unsafe address was prevented" } };
-      }
-      return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "network-error" as const, error: message.slice(0, 300) } };
-    } finally {
-      await probe.close().catch(() => { /* may already be closed by the guard above */ });
-    }
-  }));
+  });
+}
 
-  const overLimitResults = overLimit.map((cta) => {
-    const destination = new URL(cta.href, source);
-    return { evidence: { evidenceId: makeEvidenceId("cta", destination.toString(), cta.text), text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin: destination.origin === source.origin, navigationAttempted: false, outcome: "skipped-limit" as const, skippedReason: "Not tested — audit is capped at the first 5 conversion paths" } };
+interface ClassifiedCtaCandidate extends RawCtaCandidate {
+  kind: "anchor" | "button";
+  declaredUrl: string;
+  sameOrigin: boolean;
+  validProtocol: boolean;
+}
+
+interface ClickTestResult {
+  outcome: CtaOutcome;
+  interaction: CtaInteraction;
+  finalUrl?: string;
+  redirectCount?: number;
+  httpStatus?: number;
+  error?: string;
+  screenshot?: Buffer;
+}
+
+function attachRedirectGuard(page: Page, onBlocked: () => void): void {
+  // Secondary, faster-acting signal only: the ACTUAL block is context.route()'s
+  // assertSafeUrl-gated route.continue(), applied at the BrowserContext level to every
+  // page (present and future, including popups) sharing this context — that is what
+  // keeps the request from ever being dispatched. This listener just inspects each 3xx
+  // response's Location header the moment headers arrive and force-closes the page,
+  // so classification doesn't have to wait out a full navigation timeout if the
+  // underlying abort takes a moment to propagate.
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status < 300 || status >= 400) return;
+    const location = response.headers()["location"];
+    if (!location) return;
+    let target: URL;
+    try { target = new URL(location, response.url()); } catch { return; }
+    assertSafeUrl(target.toString()).catch(() => {
+      onBlocked();
+      page.close().catch(() => { /* page may already be closing */ });
+    });
+  });
+}
+
+async function followDeclaredUrlFallback(context: BrowserContext, candidate: ClassifiedCtaCandidate, cause: unknown): Promise<ClickTestResult> {
+  const causeMessage = cause instanceof Error ? cause.message : "Could not perform a real click";
+  if (candidate.kind !== "anchor") {
+    return { outcome: "network-error", interaction: "followed-declared-url", error: sanitizeText(`Click could not be performed and this element has no declared destination to verify directly: ${causeMessage}`, 300) };
+  }
+  const probe = await context.newPage();
+  let blockedByGuard = false;
+  attachRedirectGuard(probe, () => { blockedByGuard = true; });
+  try {
+    const response = await probe.goto(candidate.declaredUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    await assertSafeUrl(probe.url());
+    const redirectCount = await countRedirects(response);
+    const outcome: CtaOutcome = !response ? "network-error" : !response.ok() ? "http-error" : redirectCount > 0 ? "redirected" : "navigated";
+    const screenshot = response?.ok() ? Buffer.from(await probe.screenshot({ type: "jpeg", quality: 70 })) : undefined;
+    return { outcome, interaction: "followed-declared-url", finalUrl: probe.url(), redirectCount, httpStatus: response?.status(), error: outcome === "network-error" ? "No response received" : undefined, screenshot };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load";
+    if (blockedByGuard || isSafetyBlock(message)) {
+      return { outcome: "blocked-unsafe-redirect", interaction: "followed-declared-url", error: "Blocked: navigation to a private/unsafe address was prevented" };
+    }
+    return { outcome: "network-error", interaction: "followed-declared-url", error: message.slice(0, 300) };
+  } finally {
+    await probe.close().catch(() => { /* may already be closed by the guard above */ });
+  }
+}
+
+// Re-identifies the candidate on a *fresh* load of the source page (never the page it was
+// originally observed on) and, only if uniquely re-identifiable, performs a genuine
+// Playwright click and observes what actually happens — same-tab navigation, a new
+// popup/tab, client-side (History API) routing, or nothing at all. Never infers a
+// navigation outcome purely from the declared href.
+async function performClickTest(context: BrowserContext, sourceUrl: string, candidate: ClassifiedCtaCandidate): Promise<ClickTestResult> {
+  const probe = await context.newPage();
+  let blockedByGuard = false;
+  attachRedirectGuard(probe, () => { blockedByGuard = true; });
+
+  // A plain `let` mutated only inside the "page" listener would leave TypeScript unable to
+  // re-narrow reads made after this point in the outer function, so track the popup (if
+  // any) through a ref object instead.
+  const popupRef: { current: Page | null } = { current: null };
+  const popupResponses: Response[] = [];
+  const onNewPage = (created: Page) => {
+    if (popupRef.current) return;
+    popupRef.current = created;
+    attachRedirectGuard(created, () => { blockedByGuard = true; });
+    created.on("response", (r) => { if (r.frame() === created.mainFrame()) popupResponses.push(r); });
+  };
+  context.on("page", onNewPage);
+
+  try {
+    await probe.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    await probe.waitForLoadState("networkidle", { timeout: 6_000 }).catch(() => undefined);
+    await detectAndDismissCookieBanner(probe).catch(() => undefined);
+
+    const arrayHandle = await probe.evaluateHandle((groupKey: string) => {
+      const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+      const visible = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const nodes = [...document.querySelectorAll('button,a[href],input[type="submit"],input[type="button"],[role="button"]')].filter(visible);
+      return nodes.filter((node) => {
+        const tag = node.tagName.toLowerCase();
+        const text = tag === "input" ? clean((node as HTMLInputElement).value) : clean(node.textContent);
+        return `${tag}::${text}` === groupKey;
+      });
+    }, candidate.groupKey);
+    const matchCount: number = await arrayHandle.evaluate((arr) => arr.length);
+    if (matchCount !== candidate.groupSize || candidate.groupIndex >= matchCount) {
+      await arrayHandle.dispose();
+      return { outcome: "skipped-ambiguous-locator", interaction: "not-tested" };
+    }
+    const elementHandle = (await arrayHandle.getProperty(String(candidate.groupIndex))).asElement();
+    await arrayHandle.dispose();
+    if (!elementHandle) return { outcome: "skipped-ambiguous-locator", interaction: "not-tested" };
+
+    const mainResponses: Response[] = [];
+    probe.on("response", (r) => { if (r.frame() === probe.mainFrame()) mainResponses.push(r); });
+    const urlBefore = probe.url();
+
+    try {
+      await elementHandle.click({ timeout: 5_000 });
+    } catch (clickError) {
+      // The element could not actually be clicked (covered, detached, unactionable) — a
+      // real click never happened, so this must never be reported to the user as "clicked".
+      return await followDeclaredUrlFallback(context, candidate, clickError);
+    }
+
+    await probe.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
+    if (popupRef.current) await popupRef.current.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => undefined);
+
+    if (blockedByGuard) {
+      return { outcome: "blocked-unsafe-redirect", interaction: "clicked", error: "Blocked: navigation to a private/unsafe address was prevented" };
+    }
+
+    const targetPage = popupRef.current ?? probe;
+    await assertSafeUrl(targetPage.url());
+    const responses = popupRef.current ? popupResponses : mainResponses;
+    const finalResponse = responses.length ? responses[responses.length - 1] : null;
+
+    if (!popupRef.current && !finalResponse && targetPage.url() === urlBefore) {
+      // A real click was dispatched but produced no navigation whatsoever — e.g. a
+      // decorative button, or one that only toggles in-page state. This is what replaces
+      // the old (buggy) behavior of treating a href-less button as "navigated" to the
+      // homepage.
+      return { outcome: "no-navigation", interaction: "clicked" };
+    }
+
+    const redirectCount = await countRedirects(finalResponse);
+    const outcome: CtaOutcome = finalResponse && !finalResponse.ok() ? "http-error" : redirectCount > 0 ? "redirected" : "navigated";
+    const screenshot = !finalResponse || finalResponse.ok() ? Buffer.from(await targetPage.screenshot({ type: "jpeg", quality: 70 })) : undefined;
+    return { outcome, interaction: "clicked", finalUrl: targetPage.url(), redirectCount, httpStatus: finalResponse?.status(), screenshot };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load";
+    if (blockedByGuard || isSafetyBlock(message)) {
+      return { outcome: "blocked-unsafe-redirect", interaction: "clicked", error: "Blocked: navigation to a private/unsafe address was prevented" };
+    }
+    return { outcome: "network-error", interaction: "clicked", error: message.slice(0, 300) };
+  } finally {
+    context.off("page", onNewPage);
+    await popupRef.current?.close().catch(() => { /* may already be closed by the guard above */ });
+    await probe.close().catch(() => { /* may already be closed by the guard above */ });
+  }
+}
+
+async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, candidates: RawCtaCandidate[]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
+  const source = new URL(sourceUrl);
+
+  const classified: ClassifiedCtaCandidate[] = candidates.map((c) => {
+    const kind: "anchor" | "button" = c.tag === "a" ? "anchor" : "button";
+    if (kind !== "anchor") return { ...c, kind, declaredUrl: sourceUrl, sameOrigin: true, validProtocol: true };
+    try {
+      const resolved = new URL(c.href, source);
+      return { ...c, kind, declaredUrl: resolved.toString(), sameOrigin: resolved.origin === source.origin, validProtocol: resolved.protocol === "http:" || resolved.protocol === "https:" };
+    } catch {
+      return { ...c, kind, declaredUrl: c.href, sameOrigin: false, validProtocol: false };
+    }
   });
 
-  const invalidResults = invalidCandidates.map((cta) => ({
-    evidence: { evidenceId: makeEvidenceId("cta", cta.href, cta.text), text: cta.text, element: cta.tag, declaredUrl: cta.href, sameOrigin: false, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" },
+  const makeBase = (c: ClassifiedCtaCandidate) => ({
+    evidenceId: makeEvidenceId("cta", c.tag, c.text, String(c.groupIndex), c.declaredUrl),
+    text: c.text,
+    element: c.tag,
+    role: c.role,
+    type: c.type,
+    locator: `${c.tag}[${c.groupIndex + 1} of ${c.groupSize} matching "${c.text}"]`,
+    declaredUrl: c.declaredUrl,
+    sameOrigin: c.sameOrigin,
+  });
+
+  type Bucket = "invalid-url" | "external" | "state-changing" | "eligible";
+  const bucketOf = (c: ClassifiedCtaCandidate): Bucket => {
+    if (c.kind === "anchor" && !c.validProtocol) return "invalid-url";
+    if (c.kind === "anchor" && !c.sameOrigin) return "external";
+    if (c.stateChanging) return "state-changing";
+    return "eligible";
+  };
+  const byBucket = new Map<Bucket, ClassifiedCtaCandidate[]>([["invalid-url", []], ["external", []], ["state-changing", []], ["eligible", []]]);
+  for (const c of classified) byBucket.get(bucketOf(c))!.push(c);
+
+  const eligible = byBucket.get("eligible")!;
+  const tested = eligible.slice(0, 5);
+  const overLimit = eligible.slice(5);
+
+  const testedResults = await Promise.all(tested.map(async (c) => {
+    const result = await performClickTest(context, sourceUrl, c);
+    return {
+      evidence: {
+        ...makeBase(c),
+        interaction: result.interaction,
+        navigationAttempted: result.interaction !== "not-tested",
+        finalUrl: result.finalUrl,
+        redirectCount: result.redirectCount,
+        httpStatus: result.httpStatus,
+        outcome: result.outcome,
+        error: result.error,
+        skippedReason: result.outcome === "skipped-ambiguous-locator" ? "Could not uniquely re-identify this element on a fresh page load" : undefined,
+      },
+      screenshot: result.screenshot,
+    };
   }));
 
-  const combined = [...testedResults, ...overLimitResults, ...invalidResults];
+  const externalResults = byBucket.get("external")!.map((c) => ({ evidence: { ...makeBase(c), interaction: "not-tested" as const, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } }));
+  const stateChangingResults = byBucket.get("state-changing")!.map((c) => ({ evidence: { ...makeBase(c), interaction: "not-tested" as const, navigationAttempted: false, outcome: "skipped-potentially-state-changing" as const, skippedReason: "Potentially state-changing action (submit/checkout/delete-like) — not clicked automatically" } }));
+  const overLimitResults = overLimit.map((c) => ({ evidence: { ...makeBase(c), interaction: "not-tested" as const, navigationAttempted: false, outcome: "skipped-limit" as const, skippedReason: "Not tested — audit is capped at the first 5 conversion paths" } }));
+  const invalidResults = byBucket.get("invalid-url")!.map((c) => ({ evidence: { ...makeBase(c), interaction: "not-tested" as const, navigationAttempted: false, outcome: "skipped-invalid-url" as const, skippedReason: "Not tested — not an http(s) destination" } }));
+
+  const combined = [...testedResults, ...externalResults, ...stateChangingResults, ...overLimitResults, ...invalidResults];
   const dedupedEvidence = dedupeEvidenceIds(combined.map((r) => r.evidence));
   return combined.map((r, i) => ({ ...r, evidence: dedupedEvidence[i] }));
 }
@@ -497,7 +742,8 @@ export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult>
     // desktop-dom/seo-extraction below, which ARE foundational and do rethrow.
     let ctaResults: { evidence: CtaJourneyEvidence; screenshot?: Buffer }[] = [];
     try {
-      ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, pageData.ctas);
+      const ctaCandidates = await extractCtaCandidates(desktopPage);
+      ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, ctaCandidates);
       tests.push({ id: "cta-journey-desktop", status: "passed" });
     } catch (error) {
       tests.push({ id: "cta-journey-desktop", status: "failed", reason: error instanceof Error ? error.message : "CTA journey testing failed" });

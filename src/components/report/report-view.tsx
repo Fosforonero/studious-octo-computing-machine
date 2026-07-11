@@ -22,14 +22,18 @@ function buildWalkthrough(page: ExtractedPage): string[] {
 
   const evidenceJourneys = page.evidence?.desktop.ctaJourneys;
   if (evidenceJourneys) {
-    // Verified-action language ("I click… it loads…") only when a real navigation
-    // actually happened — everything else (external, skipped, blocked) gets
-    // observation-of-non-action language instead.
+    // "I click" is only ever used when Lensiq actually performed a real click
+    // (interaction === "clicked") — everything else (a direct URL check, external,
+    // skipped, blocked) gets honest observation-of-non-action language instead.
     for (const journey of evidenceJourneys.slice(0, 3)) {
-      if (journey.navigationAttempted && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
+      if (journey.interaction === "clicked" && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
         steps.push(`I click “${journey.text}” — it ${journey.outcome === "redirected" ? "redirects and loads" : "loads"}.`);
+      } else if (journey.interaction === "clicked" && journey.outcome === "no-navigation") {
+        steps.push(`I click “${journey.text}” — nothing happens; it doesn't take me anywhere.`);
       } else if (journey.outcome === "external-not-visited") {
         steps.push(`I see “${journey.text}” — it points to an external site, not visited in this audit.`);
+      } else if (journey.interaction === "followed-declared-url" && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
+        steps.push(`I see “${journey.text}” — a real click wasn't possible, so Lensiq verified its declared destination directly: ${journey.outcome === "redirected" ? "it redirects to" : "it loads"} ${journey.finalUrl ?? journey.declaredUrl}.`);
       } else {
         steps.push(`I see “${journey.text}” — not tested in this audit.`);
       }

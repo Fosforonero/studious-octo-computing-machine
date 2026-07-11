@@ -45,14 +45,15 @@ export interface BoundingBox {
 
 // Geometric measurement is "verified"; whether it represents a real problem is always
 // "inferred" — an overlay can be intentional, a small target can satisfy a WCAG 2.5.8
-// exception. `status` is deliberately always "inferred" for a populated candidate.
+// exception. `status` is a literal, not the generic EvidenceStatus, because a *populated*
+// candidate's conclusion is never verified and never not-assessed — only ever inferred.
 export interface OverlapCandidate {
   evidenceId: EvidenceId;
   selector: string;
   overlapsWithSelector: string;
   issue: "cutoff" | "overlap";
   boundingBox: BoundingBox;
-  status: EvidenceStatus;
+  status: "inferred";
 }
 
 export interface SmallTapTargetCandidate {
@@ -61,7 +62,7 @@ export interface SmallTapTargetCandidate {
   boundingBox: BoundingBox;
   widthPx: number;
   heightPx: number;
-  status: EvidenceStatus;
+  status: "inferred";
 }
 
 export interface CookieBannerEvidence {
@@ -75,20 +76,37 @@ export interface CookieBannerEvidence {
   screenshotAfterDismiss?: string;
 }
 
+// Whether Lensiq actually clicked the element, only verified its declared destination by
+// direct navigation (a fallback when a real click could not be performed for a benign,
+// non-security reason — e.g. the element became unactionable on a fresh reload), or never
+// interacted with it at all. The report may only say "I click" when this is "clicked".
+export type CtaInteraction = "clicked" | "followed-declared-url" | "not-tested";
+
 export type CtaOutcome =
   | "navigated"
   | "redirected"
+  | "no-navigation"
   | "http-error"
   | "network-error"
   | "blocked-unsafe-redirect"
   | "external-not-visited"
   | "skipped-limit"
-  | "skipped-invalid-url";
+  | "skipped-invalid-url"
+  | "skipped-potentially-state-changing"
+  | "skipped-ambiguous-locator";
 
 export interface CtaJourneyEvidence {
   evidenceId: EvidenceId;
   text: string;
   element: string;
+  role: string | null;
+  type: string | null;
+  // Sanitized, human-readable description of how the element was re-identified on a
+  // fresh page load (tag + normalized text + DOM-order index within same tag+text
+  // group) — enough to locate the exact element again, never a raw CSS/XPath dump of
+  // page-authored attributes.
+  locator: string;
+  interaction: CtaInteraction;
   declaredUrl: string;
   sameOrigin: boolean;
   navigationAttempted: boolean;

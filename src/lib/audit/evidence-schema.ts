@@ -44,8 +44,8 @@ const methodologyBase = z.object({
   limitations: z.array(z.string().max(300)).max(20),
 });
 
-const overlapCandidate = z.object({ evidenceId, selector: z.string().max(300), overlapsWithSelector: z.string().max(300), issue: z.enum(["cutoff", "overlap"]), boundingBox, status: evidenceStatus });
-const smallTapTargetCandidate = z.object({ evidenceId, selector: z.string().max(300), boundingBox, widthPx: z.number().nonnegative(), heightPx: z.number().nonnegative(), status: evidenceStatus });
+const overlapCandidate = z.object({ evidenceId, selector: z.string().max(300), overlapsWithSelector: z.string().max(300), issue: z.enum(["cutoff", "overlap"]), boundingBox, status: z.literal("inferred") });
+const smallTapTargetCandidate = z.object({ evidenceId, selector: z.string().max(300), boundingBox, widthPx: z.number().nonnegative(), heightPx: z.number().nonnegative(), status: z.literal("inferred") });
 
 const cookieBannerEvidence = z
   .object({
@@ -62,15 +62,34 @@ const cookieBannerEvidence = z
     if (val.blockingStatus === "not-assessed" && val.blocking !== null) ctx.addIssue({ code: "custom", message: "blocking must be null when blockingStatus is not-assessed" });
     if (val.blockingStatus !== "not-assessed" && val.blocking === null) ctx.addIssue({ code: "custom", message: "blocking must not be null when blockingStatus is not not-assessed" });
     if (!val.detected && (val.dismissAttempted || val.dismissed)) ctx.addIssue({ code: "custom", message: "dismissAttempted/dismissed require detected" });
+    if (val.dismissed && !val.dismissAttempted) ctx.addIssue({ code: "custom", message: "dismissed=true requires dismissAttempted=true" });
+    if (!val.detected && (val.screenshotBeforeDismiss || val.screenshotAfterDismiss)) ctx.addIssue({ code: "custom", message: "cookie screenshots cannot exist when detected=false" });
   });
 
-const ctaOutcome = z.enum(["navigated", "redirected", "http-error", "network-error", "blocked-unsafe-redirect", "external-not-visited", "skipped-limit", "skipped-invalid-url"]);
+const ctaOutcome = z.enum([
+  "navigated",
+  "redirected",
+  "no-navigation",
+  "http-error",
+  "network-error",
+  "blocked-unsafe-redirect",
+  "external-not-visited",
+  "skipped-limit",
+  "skipped-invalid-url",
+  "skipped-potentially-state-changing",
+  "skipped-ambiguous-locator",
+]);
+const ctaInteraction = z.enum(["clicked", "followed-declared-url", "not-tested"]);
 
 const ctaJourneyEvidence = z
   .object({
     evidenceId,
     text: z.string().max(300),
     element: z.string().max(50),
+    role: z.string().max(50).nullable(),
+    type: z.string().max(50).nullable(),
+    locator: z.string().max(300),
+    interaction: ctaInteraction,
     declaredUrl: z.string().max(2000),
     sameOrigin: z.boolean(),
     navigationAttempted: z.boolean(),
@@ -85,6 +104,7 @@ const ctaJourneyEvidence = z
   .superRefine((val, ctx) => {
     const requireSkipped = () => {
       if (!val.skippedReason) ctx.addIssue({ code: "custom", message: `skippedReason required for outcome ${val.outcome}` });
+      if (val.interaction !== "not-tested") ctx.addIssue({ code: "custom", message: `${val.outcome} requires interaction=not-tested` });
     };
     switch (val.outcome) {
       case "external-not-visited":
@@ -94,6 +114,8 @@ const ctaJourneyEvidence = z
         break;
       case "skipped-limit":
       case "skipped-invalid-url":
+      case "skipped-potentially-state-changing":
+      case "skipped-ambiguous-locator":
         if (val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=false` });
         requireSkipped();
         break;
@@ -101,37 +123,51 @@ const ctaJourneyEvidence = z
       case "redirected":
         if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=true` });
         if (!val.finalUrl) ctx.addIssue({ code: "custom", message: `${val.outcome} requires finalUrl` });
+        if (val.interaction === "not-tested") ctx.addIssue({ code: "custom", message: `${val.outcome} requires interaction=clicked or followed-declared-url` });
         if (val.outcome === "redirected" && !(val.redirectCount && val.redirectCount >= 1)) ctx.addIssue({ code: "custom", message: "redirected requires redirectCount >= 1" });
+        break;
+      case "no-navigation":
+        if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: "no-navigation requires navigationAttempted=true" });
+        if (val.interaction !== "clicked") ctx.addIssue({ code: "custom", message: "no-navigation only ever follows a real click — requires interaction=clicked" });
         break;
       case "http-error":
         if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: "http-error requires navigationAttempted=true" });
         if (val.httpStatus === undefined) ctx.addIssue({ code: "custom", message: "http-error requires httpStatus" });
+        if (val.interaction === "not-tested") ctx.addIssue({ code: "custom", message: "http-error requires interaction=clicked or followed-declared-url" });
         break;
       case "network-error":
       case "blocked-unsafe-redirect":
         if (!val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=true` });
         if (!val.error) ctx.addIssue({ code: "custom", message: `${val.outcome} requires error` });
+        if (val.interaction === "not-tested") ctx.addIssue({ code: "custom", message: `${val.outcome} requires interaction=clicked or followed-declared-url` });
         break;
     }
   });
 
-const browserEvidence = z.object({
-  viewport: z.enum(["desktop", "mobile"]),
-  headline: z.string().max(500).nullable(),
-  headingHierarchy: z.array(z.object({ level: z.number().int().min(1).max(6), text: z.string().max(500) })).max(80),
-  aboveFold: z.object({ text: z.string().max(5000), ctaTexts: z.array(z.string().max(300)).max(50), imageCount: z.number().nonnegative() }),
-  ctasVisible: z.array(z.object({ text: z.string().max(300), href: z.string().max(2000), tag: z.string().max(20), position: z.enum(["above-fold", "below-fold"]) })).max(50),
-  navPresent: z.boolean(),
-  hasHorizontalOverflow: z.boolean().nullable(),
-  overlapCandidates: z.array(overlapCandidate).max(30).nullable(),
-  overlapCandidatesStatus: evidenceStatus,
-  smallTapTargetCandidates: z.array(smallTapTargetCandidate).max(30).nullable(),
-  smallTapTargetCandidatesStatus: evidenceStatus,
-  forms: z.array(z.object({ action: z.string().max(2000), inputs: z.array(z.object({ name: z.string().max(200), type: z.string().max(50), hasLabel: z.boolean() })).max(30) })).max(20),
-  landmarks: z.object({ hasNav: z.boolean(), hasFooter: z.boolean(), hasMain: z.boolean() }),
-  images: z.array(z.object({ src: z.string().max(2000), hasAlt: z.boolean(), aboveFold: z.boolean() })).max(50),
-  cookieBanner: cookieBannerEvidence,
-});
+const browserEvidence = z
+  .object({
+    viewport: z.enum(["desktop", "mobile"]),
+    headline: z.string().max(500).nullable(),
+    headingHierarchy: z.array(z.object({ level: z.number().int().min(1).max(6), text: z.string().max(500) })).max(80),
+    aboveFold: z.object({ text: z.string().max(5000), ctaTexts: z.array(z.string().max(300)).max(50), imageCount: z.number().nonnegative() }),
+    ctasVisible: z.array(z.object({ text: z.string().max(300), href: z.string().max(2000), tag: z.string().max(20), position: z.enum(["above-fold", "below-fold"]) })).max(50),
+    navPresent: z.boolean(),
+    hasHorizontalOverflow: z.boolean().nullable(),
+    overlapCandidates: z.array(overlapCandidate).max(30).nullable(),
+    overlapCandidatesStatus: evidenceStatus,
+    smallTapTargetCandidates: z.array(smallTapTargetCandidate).max(30).nullable(),
+    smallTapTargetCandidatesStatus: evidenceStatus,
+    forms: z.array(z.object({ action: z.string().max(2000), inputs: z.array(z.object({ name: z.string().max(200), type: z.string().max(50), hasLabel: z.boolean() })).max(30) })).max(20),
+    landmarks: z.object({ hasNav: z.boolean(), hasFooter: z.boolean(), hasMain: z.boolean() }),
+    images: z.array(z.object({ src: z.string().max(2000), hasAlt: z.boolean(), aboveFold: z.boolean() })).max(50),
+    cookieBanner: cookieBannerEvidence,
+  })
+  .superRefine((val, ctx) => {
+    if (val.overlapCandidatesStatus === "not-assessed" && val.overlapCandidates !== null) ctx.addIssue({ code: "custom", message: "overlapCandidates must be null when overlapCandidatesStatus is not-assessed" });
+    if (val.overlapCandidatesStatus !== "not-assessed" && val.overlapCandidates === null) ctx.addIssue({ code: "custom", message: "overlapCandidates must not be null when overlapCandidatesStatus is not not-assessed" });
+    if (val.smallTapTargetCandidatesStatus === "not-assessed" && val.smallTapTargetCandidates !== null) ctx.addIssue({ code: "custom", message: "smallTapTargetCandidates must be null when smallTapTargetCandidatesStatus is not-assessed" });
+    if (val.smallTapTargetCandidatesStatus !== "not-assessed" && val.smallTapTargetCandidates === null) ctx.addIssue({ code: "custom", message: "smallTapTargetCandidates must not be null when smallTapTargetCandidatesStatus is not not-assessed" });
+  });
 
 const consoleNetworkEvidence = z.object({
   consoleErrors: z.array(z.object({ evidenceId, message: z.string().max(500), timestamp: isoTimestamp })).max(20),
@@ -158,6 +194,7 @@ const jsonLdEvidence = z
   })
   .superRefine((val, ctx) => {
     if (val.contentMatchStatus === "not-assessed" && val.contentMatch !== null) ctx.addIssue({ code: "custom", message: "contentMatch must be null when not-assessed" });
+    if (val.contentMatchStatus !== "not-assessed" && val.contentMatch === null) ctx.addIssue({ code: "custom", message: "contentMatch must not be null when contentMatchStatus is not not-assessed" });
   });
 
 const seoEvidence = z.object({
@@ -190,6 +227,7 @@ const performanceEvidence = z.object({
     })
     .superRefine((val, ctx) => {
       if (val.status === "available") {
+        if (val.source === "not-integrated") ctx.addIssue({ code: "custom", message: "source=not-integrated cannot have status=available" });
         if (val.lcp === null || val.cls === null || val.inp === null) ctx.addIssue({ code: "custom", message: "available field metrics require non-null lcp/cls/inp" });
         if (val.percentile === null || val.periodDays === null) ctx.addIssue({ code: "custom", message: "available field metrics require percentile/periodDays" });
       } else if (val.lcp !== null || val.cls !== null || val.inp !== null) {
@@ -238,4 +276,6 @@ export const AuditEvidenceV2Schema = z
       const hasSkipRecord = val.methodology.tests.some((t) => t.id === "cta-journey-mobile" && t.status === "skipped" && t.reason);
       if (!hasSkipRecord) ctx.addIssue({ code: "custom", message: "mobile.ctaJourneys=null requires a cta-journey-mobile skipped test record with a reason" });
     }
+    if (val.desktop.browser.viewport !== "desktop") ctx.addIssue({ code: "custom", message: "desktop.browser.viewport must be \"desktop\"" });
+    if (val.mobile.browser.viewport !== "mobile") ctx.addIssue({ code: "custom", message: "mobile.browser.viewport must be \"mobile\"" });
   });

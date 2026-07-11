@@ -1,5 +1,5 @@
 import { claimNextAudit, completeAudit, failAudit, saveScan } from "@/lib/db/audits";
-import { scanHomepage } from "@/lib/audit/browser-scanner";
+import { scanHomepage, clearScreenshotBuffer, clearCookieBannerBuffers } from "@/lib/audit/browser-scanner";
 import { runLighthouse, buildAutomatedAccessibilityChecks } from "@/lib/audit/lighthouse-scanner";
 import { generateReport } from "@/lib/audit/generate-report";
 import { uploadCtaScreenshots, uploadCookieBannerScreenshots, uploadScreenshots } from "@/lib/storage/screenshots";
@@ -19,8 +19,8 @@ export async function processNextAudit() {
     browserResult.page.desktopScreenshotPath = screenshots.desktop;
     browserResult.page.mobileScreenshotPath = screenshots.mobile;
 
-    const ctaScreenshots = await uploadCtaScreenshots(audit.id, browserResult.ctaScreenshots);
-    for (const { evidenceId, path } of ctaScreenshots) {
+    const ctaUpload = await uploadCtaScreenshots(audit.id, browserResult.ctaScreenshots);
+    for (const { evidenceId, path } of ctaUpload.uploaded) {
       const journey = browserResult.evidenceParts.desktop.ctaJourneys.find((j) => j.evidenceId === evidenceId);
       if (journey) journey.screenshotRef = path;
     }
@@ -28,25 +28,38 @@ export async function processNextAudit() {
     // records — the legacy shape is always a projection of the v2 measurement, matched
     // by evidenceId, never a second independent computation or an index-based join.
     browserResult.page.ctaJourneys = deriveLegacyCtaJourneys(browserResult.evidenceParts.desktop.ctaJourneys);
-    // Buffers are no longer needed once uploaded — drop references so nothing
-    // downstream could accidentally serialize them into JSON/DB.
-    browserResult.ctaScreenshots.forEach((entry) => { (entry as { buffer?: Buffer }).buffer = undefined; });
+    // Buffers are no longer needed once uploaded (or once upload has failed and been
+    // recorded) — drop references so nothing downstream could accidentally serialize
+    // them into JSON/DB. A partial failure here never discards the successful refs
+    // attached just above.
+    browserResult.ctaScreenshots.forEach(clearScreenshotBuffer);
 
     const tests: TestExecutionRecord[] = [...browserResult.evidenceParts.tests, { id: "lighthouse-lab", status: "passed" }];
-    const cookieUpload = await uploadCookieBannerScreenshots(audit.id, browserResult.cookieBannerScreenshots);
-    tests.push(
-      cookieUpload.failedStages.length > 0
-        ? { id: "cookie-banner-screenshot-upload", status: "failed", reason: sanitizeText(`Upload failed for: ${cookieUpload.failedStages.join(", ")}`, 300) }
-        : { id: "cookie-banner-screenshot-upload", status: "passed" },
-    );
-    browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.desktop.before;
-    browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.desktop.after;
-    browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.mobile.before;
-    browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.mobile.after;
-    browserResult.cookieBannerScreenshots.desktop.before = undefined;
-    browserResult.cookieBannerScreenshots.desktop.after = undefined;
-    browserResult.cookieBannerScreenshots.mobile.before = undefined;
-    browserResult.cookieBannerScreenshots.mobile.after = undefined;
+    const limitations = ["single page only, not a site-wide crawl", "field performance data not assessed — no CrUX integration this release"];
+    if (ctaUpload.failedEvidenceIds.length > 0) {
+      // A screenshot upload failure never invalidates the CTA journey evidence itself
+      // (navigation was still tested and recorded correctly) — it just means those
+      // specific journeys have no screenshotRef, which this limitation makes explicit
+      // rather than silently passing.
+      limitations.push(sanitizeText(`Screenshot upload failed for ${ctaUpload.failedEvidenceIds.length} CTA(s); their navigation evidence is unaffected, only the screenshot is missing`, 300));
+    }
+
+    const bannerDetectedSomewhere = browserResult.evidenceParts.desktop.browser.cookieBanner.detected || browserResult.evidenceParts.mobile.browser.cookieBanner.detected;
+    if (!bannerDetectedSomewhere) {
+      tests.push({ id: "cookie-banner-screenshot-upload", status: "skipped", reason: "No cookie banner detected on either viewport — nothing to capture" });
+    } else {
+      const cookieUpload = await uploadCookieBannerScreenshots(audit.id, browserResult.cookieBannerScreenshots);
+      tests.push(
+        cookieUpload.failedStages.length > 0
+          ? { id: "cookie-banner-screenshot-upload", status: "failed", reason: sanitizeText(`Upload failed for: ${cookieUpload.failedStages.join(", ")}`, 300) }
+          : { id: "cookie-banner-screenshot-upload", status: "passed" },
+      );
+      browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.desktop.before;
+      browserResult.evidenceParts.desktop.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.desktop.after;
+      browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotBeforeDismiss = cookieUpload.mobile.before;
+      browserResult.evidenceParts.mobile.browser.cookieBanner.screenshotAfterDismiss = cookieUpload.mobile.after;
+    }
+    clearCookieBannerBuffers(browserResult.cookieBannerScreenshots);
 
     const evidenceUnsanitized: AuditEvidenceV2 = {
       contractVersion: 2,
@@ -63,7 +76,7 @@ export async function processNextAudit() {
         tool: { lighthouseVersion: performanceEvidence.lab.lighthouseVersion },
         redirects: browserResult.evidenceParts.redirects,
         tests,
-        limitations: ["single page only, not a site-wide crawl", "field performance data not assessed — no CrUX integration this release"],
+        limitations,
       },
       seo: browserResult.evidenceParts.seo,
       desktop: { browser: browserResult.evidenceParts.desktop.browser, console: browserResult.evidenceParts.desktop.console, ctaJourneys: browserResult.evidenceParts.desktop.ctaJourneys },

@@ -4,7 +4,21 @@ import { sanitizeUrl, sanitizeText, sanitizeEvidenceV2, hashContent } from "@/li
 import { makeEvidenceId, dedupeEvidenceIds } from "@/lib/audit/evidence-id";
 import { AuditEvidenceV2Schema } from "@/lib/audit/evidence-schema";
 import { deriveLegacyCookieBanner, deriveLegacyCtaJourneys } from "@/lib/audit/evidence-legacy";
+import { clearScreenshotBuffer, clearCookieBannerBuffers, type BrowserScanResult } from "@/lib/audit/browser-scanner";
 import type { AuditEvidenceV2, CtaJourneyEvidence } from "@/lib/audit/evidence-types";
+
+function baseCta(overrides: Partial<CtaJourneyEvidence> & Pick<CtaJourneyEvidence, "evidenceId" | "declaredUrl" | "outcome" | "interaction">): CtaJourneyEvidence {
+  return {
+    text: "A",
+    element: "a",
+    role: null,
+    type: null,
+    locator: 'a[1 of 1 matching "A"]',
+    sameOrigin: true,
+    navigationAttempted: true,
+    ...overrides,
+  };
+}
 
 function validEvidence(): AuditEvidenceV2 {
   // A minimal but fully-valid fixture — every test below clones and mutates this.
@@ -154,44 +168,71 @@ test("blocking=true with blockingStatus=not-assessed is rejected", () => {
 
 test("navigated outcome without finalUrl is rejected", () => {
   const evidence = validEvidence();
-  const journey: CtaJourneyEvidence = { evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, outcome: "navigated" };
+  const journey = baseCta({ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), declaredUrl: "https://x.com/a", outcome: "navigated", interaction: "clicked" });
   evidence.desktop.ctaJourneys = [journey];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("navigated outcome with interaction=not-tested is rejected — 'navigated' can only follow a real click or a declared-URL check", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), declaredUrl: "https://x.com/a", outcome: "navigated", interaction: "not-tested", finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200 })];
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
 });
 
 test("redirected outcome with redirectCount=0 is rejected", () => {
   const evidence = validEvidence();
   evidence.desktop.ctaJourneys = [
-    { evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "redirected" },
+    baseCta({ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), declaredUrl: "https://x.com/a", interaction: "clicked", finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "redirected" }),
   ];
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
 });
 
 test("blocked-unsafe-redirect without error field is rejected", () => {
   const evidence = validEvidence();
-  evidence.desktop.ctaJourneys = [
-    { evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, outcome: "blocked-unsafe-redirect" },
-  ];
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), declaredUrl: "https://x.com/a", interaction: "clicked", outcome: "blocked-unsafe-redirect" })];
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
 });
 
 test("blocked-unsafe-redirect with a sanitized error passes and never carries a raw private IP", () => {
   const evidence = validEvidence();
   evidence.desktop.ctaJourneys = [
-    {
+    baseCta({
       evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"),
-      text: "A",
-      element: "a",
       declaredUrl: "https://x.com/a",
-      sameOrigin: true,
-      navigationAttempted: true,
+      interaction: "clicked",
       outcome: "blocked-unsafe-redirect",
       error: "Blocked: navigation to a private/unsafe address was prevented",
-    },
+    }),
   ];
   const result = AuditEvidenceV2Schema.safeParse(evidence);
   assert.equal(result.success, true);
   if (result.success) assert.doesNotMatch(JSON.stringify(result.data), /\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+});
+
+test("no-navigation requires interaction=clicked (a followed-declared-url click can never produce it)", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "https://x.com/a", "A"), declaredUrl: "https://x.com/a", interaction: "followed-declared-url", outcome: "no-navigation" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("no-navigation with interaction=clicked passes — replaces the old false 'navigated to homepage' behavior for a no-op button", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "button", "Toggle"), declaredUrl: "https://x.com/", element: "button", interaction: "clicked", outcome: "no-navigation" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
+});
+
+test("skipped-potentially-state-changing requires interaction=not-tested and a skippedReason", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "submit", "Save"), declaredUrl: "https://x.com/", element: "button", type: "submit", interaction: "clicked", navigationAttempted: false, outcome: "skipped-potentially-state-changing" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "submit", "Save"), declaredUrl: "https://x.com/", element: "button", type: "submit", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-potentially-state-changing", skippedReason: "Potentially state-changing" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
+});
+
+test("skipped-ambiguous-locator requires interaction=not-tested and a skippedReason", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "a", "Learn more"), declaredUrl: "https://x.com/", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-ambiguous-locator", skippedReason: "Could not uniquely re-identify this element" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
 });
 
 test("field performance status=available without values is rejected", () => {
@@ -200,9 +241,59 @@ test("field performance status=available without values is rejected", () => {
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
 });
 
+test("field performance source=not-integrated cannot have status=available", () => {
+  const evidence = validEvidence();
+  evidence.performance.field = { source: "not-integrated", status: "available", percentile: 75, periodDays: 28, lcp: 1000, cls: 0.1, inp: 100 };
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
 test("mobile.ctaJourneys=null without a cta-journey-mobile skip record is rejected", () => {
   const evidence = validEvidence();
   evidence.methodology.tests = evidence.methodology.tests.filter((t) => t.id !== "cta-journey-mobile");
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("desktop.browser.viewport must be \"desktop\" and mobile.browser.viewport must be \"mobile\"", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.viewport = "mobile";
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("overlapCandidates must be null iff overlapCandidatesStatus is not-assessed", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.overlapCandidatesStatus = "verified";
+  evidence.desktop.browser.overlapCandidates = null;
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+  evidence.desktop.browser.overlapCandidates = [{ evidenceId: makeEvidenceId("overlap", "x"), selector: "div", overlapsWithSelector: "body", issue: "overlap", boundingBox: { x: 0, y: 0, width: 1, height: 1 }, status: "inferred" }];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
+  evidence.desktop.browser.overlapCandidatesStatus = "not-assessed";
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("smallTapTargetCandidates must be null iff smallTapTargetCandidatesStatus is not-assessed", () => {
+  const evidence = validEvidence();
+  evidence.mobile.browser.smallTapTargetCandidatesStatus = "verified";
+  evidence.mobile.browser.smallTapTargetCandidates = null;
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("contentMatch must be non-null whenever contentMatchStatus is not not-assessed", () => {
+  const evidence = validEvidence();
+  evidence.seo.jsonLd = [{ evidenceId: "jsonld:abc", parsed: true, types: ["Product"], excerptHash: "a".repeat(64), contentMatch: null, contentMatchStatus: "inferred" }];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+  evidence.seo.jsonLd[0].contentMatch = true;
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
+});
+
+test("cookie dismissed=true requires dismissAttempted=true", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.cookieBanner = { detected: true, dismissAttempted: false, dismissed: true, blocking: false, blockingStatus: "verified", buttonsFound: ["Accept"] };
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+});
+
+test("cookie screenshots cannot exist when detected=false", () => {
+  const evidence = validEvidence();
+  evidence.desktop.browser.cookieBanner = { detected: false, dismissAttempted: false, dismissed: false, blocking: null, blockingStatus: "not-assessed", buttonsFound: [], screenshotBeforeDismiss: "https://storage/x.jpg" };
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
 });
 
@@ -221,12 +312,30 @@ test("deriveLegacyCookieBanner mirrors detected/dismissed exactly", () => {
 
 test("deriveLegacyCtaJourneys maps CTA<->screenshot by evidenceId-scoped screenshotRef, not array position", () => {
   const journeys: CtaJourneyEvidence[] = [
-    { evidenceId: "cta:aaa", text: "A", element: "a", declaredUrl: "https://x.com/a", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/a.jpg" },
-    { evidenceId: "cta:bbb", text: "B", element: "a", declaredUrl: "https://x.com/b", sameOrigin: true, navigationAttempted: true, finalUrl: "https://x.com/b", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/b.jpg" },
+    baseCta({ evidenceId: "cta:aaa", declaredUrl: "https://x.com/a", interaction: "clicked", finalUrl: "https://x.com/a", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/a.jpg" }),
+    baseCta({ evidenceId: "cta:bbb", text: "B", declaredUrl: "https://x.com/b", interaction: "clicked", finalUrl: "https://x.com/b", redirectCount: 0, httpStatus: 200, outcome: "navigated", screenshotRef: "https://storage/b.jpg" }),
   ];
   const legacy = deriveLegacyCtaJourneys(journeys);
   assert.equal(legacy[0].screenshotPath, "https://storage/a.jpg");
   assert.equal(legacy[1].screenshotPath, "https://storage/b.jpg");
+});
+
+test("deriveLegacyCtaJourneys never says 'Clicked' for a followed-declared-url journey", () => {
+  const journeys: CtaJourneyEvidence[] = [baseCta({ evidenceId: "cta:ccc", declaredUrl: "https://x.com/c", interaction: "followed-declared-url", finalUrl: "https://x.com/c", redirectCount: 0, httpStatus: 200, outcome: "navigated" })];
+  const legacy = deriveLegacyCtaJourneys(journeys);
+  assert.doesNotMatch(legacy[0].outcome, /^Clicked/);
+});
+
+test("deriveLegacyCtaJourneys covers no-navigation, skipped-potentially-state-changing and skipped-ambiguous-locator", () => {
+  const journeys: CtaJourneyEvidence[] = [
+    baseCta({ evidenceId: "cta:1", declaredUrl: "https://x.com/", element: "button", interaction: "clicked", navigationAttempted: true, outcome: "no-navigation" }),
+    baseCta({ evidenceId: "cta:2", declaredUrl: "https://x.com/", element: "button", type: "submit", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-potentially-state-changing", skippedReason: "state-changing" }),
+    baseCta({ evidenceId: "cta:3", declaredUrl: "https://x.com/", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-ambiguous-locator", skippedReason: "ambiguous" }),
+  ];
+  const legacy = deriveLegacyCtaJourneys(journeys);
+  assert.match(legacy[0].outcome, /no navigation/i);
+  assert.match(legacy[1].outcome, /state-changing/i);
+  assert.match(legacy[2].outcome, /uniquely re-identify/i);
 });
 
 test("no Buffer or absolute local filesystem path survives into a schema-valid evidence object", () => {
@@ -236,6 +345,59 @@ test("no Buffer or absolute local filesystem path survives into a schema-valid e
   assert.doesNotMatch(serialized, /\/Volumes\/|\/private\/tmp\/|\/Users\//);
 });
 
+test("clearScreenshotBuffer and clearCookieBannerBuffers actually remove Buffers from a populated lifecycle object (exercises the real cleanup path used by process-audit.ts)", () => {
+  const ctaScreenshots = [{ evidenceId: "cta:aaa", buffer: Buffer.from("jpeg-bytes") as Buffer | undefined }];
+  ctaScreenshots.forEach(clearScreenshotBuffer);
+  assert.equal(ctaScreenshots[0].buffer, undefined);
+  assert.doesNotMatch(JSON.stringify(ctaScreenshots), /"type":"Buffer"/);
+
+  const cookieBannerScreenshots: BrowserScanResult["cookieBannerScreenshots"] = {
+    desktop: { before: Buffer.from("a"), after: Buffer.from("b") },
+    mobile: { before: Buffer.from("c"), after: Buffer.from("d") },
+  };
+  clearCookieBannerBuffers(cookieBannerScreenshots);
+  assert.deepEqual(cookieBannerScreenshots, { desktop: { before: undefined, after: undefined }, mobile: { before: undefined, after: undefined } });
+  assert.doesNotMatch(JSON.stringify(cookieBannerScreenshots), /"type":"Buffer"/);
+});
+
 test("hashContent is deterministic", () => {
   assert.equal(hashContent("<script>{}</script>"), hashContent("<script>{}</script>"));
+});
+
+test("redactSensitivePatterns-backed sanitizeText redacts private IPv6 and internal hostnames", () => {
+  const out = sanitizeText("link-local fe80::1ff:fe23:4567:890a and internal host db1.internal and localhost:5432", 1000);
+  assert.doesNotMatch(out, /fe80::1ff/);
+  assert.doesNotMatch(out, /db1\.internal/);
+  assert.doesNotMatch(out, /localhost:5432/);
+});
+
+test("sanitizeEvidenceV2 redacts sensitive content across every major evidence group, not just one nested href", () => {
+  const evidence = validEvidence();
+  const email = "leak@example.com";
+  const uuid = "550e8400-e29b-41d4-a716-446655440000";
+  const token = "aVeryLongOpaqueToken1234567890123456";
+  const privateIp = "10.1.2.3";
+  const secret = `${email} ${uuid} ${token} ${privateIp}`;
+
+  evidence.methodology.pageGoal = `signups ${secret}`;
+  evidence.desktop.browser.headline = `Welcome ${secret}`;
+  evidence.desktop.browser.headingHierarchy = [{ level: 2, text: `Section ${secret}` }];
+  evidence.desktop.browser.aboveFold = { text: `Fold ${secret}`, ctaTexts: [`CTA ${secret}`], imageCount: 0 };
+  evidence.desktop.browser.cookieBanner = { detected: true, dismissAttempted: true, dismissed: true, blocking: false, blockingStatus: "verified", buttonsFound: [`Accept ${secret}`] };
+  evidence.seo.title = `Title ${secret}`;
+  evidence.seo.metaDescription = `Description ${secret}`;
+  evidence.seo.robotsMeta = `index, ${secret}`;
+  evidence.seo.xRobotsTag = `noindex, ${secret}`;
+  evidence.seo.headings = [{ level: 1, text: `Heading ${secret}` }];
+  evidence.seo.links = [{ text: `Link ${secret}`, href: "https://example.com/x", sameOrigin: true }];
+  evidence.seo.jsonLd = [{ evidenceId: "jsonld:abc", parsed: false, types: [], parseError: `bad json ${secret}`, excerptHash: "a".repeat(64), contentMatch: null, contentMatchStatus: "not-assessed" }];
+  evidence.desktop.console.failedRequests = [{ evidenceId: "network:1", url: "https://example.com/x", resourceType: "image", domain: `${secret}.example.com`, status: 404 }];
+  evidence.accessibility.desktop.automatedChecks.failedAudits = [{ evidenceId: "acc:1", id: "color-contrast", title: `Contrast issue ${secret}`, impact: `serious ${secret}` }];
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: "cta:x", text: `Click ${secret}`, declaredUrl: "https://example.com/x", interaction: "clicked", outcome: "network-error", error: `Failed ${secret}`, skippedReason: undefined })];
+
+  const sanitized = sanitizeEvidenceV2(evidence);
+  const serialized = JSON.stringify(sanitized);
+  for (const needle of [email, uuid, token, privateIp]) {
+    assert.doesNotMatch(serialized, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `expected "${needle}" to be redacted somewhere in the sanitized evidence`);
+  }
 });
