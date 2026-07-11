@@ -273,6 +273,26 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
       return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: false, outcome: "external-not-visited" as const, skippedReason: "External destination — not navigated in this audit" } };
     }
     const probe = await context.newPage();
+    // Defense in depth beyond the context-level route guard: validate every redirect
+    // response's Location header the moment its headers arrive — BEFORE Chrome has a
+    // chance to dispatch the follow-up request — and force-close the page if it points
+    // somewhere unsafe. This is what actually guarantees "blocked before the request"
+    // for a redirect hop, rather than depending on route-interception timing that can
+    // otherwise let the connection attempt hang until the navigation timeout.
+    let blockedByGuard = false;
+    probe.on("response", (response) => {
+      if (blockedByGuard) return;
+      const status = response.status();
+      if (status < 300 || status >= 400) return;
+      const location = response.headers()["location"];
+      if (!location) return;
+      let target: URL;
+      try { target = new URL(location, response.url()); } catch { return; }
+      assertSafeUrl(target.toString()).catch(() => {
+        blockedByGuard = true;
+        probe.close().catch(() => { /* page may already be closing */ });
+      });
+    });
     try {
       const response = await probe.goto(destination.toString(), { waitUntil: "domcontentloaded", timeout: 15_000 });
       await assertSafeUrl(probe.url());
@@ -288,12 +308,12 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
       // A redirect toward a private/unsafe address is a deliberate protection firing,
       // not a generic transport failure — record it distinctly, with a fixed generic
       // message so the real (possibly private) address is never persisted.
-      if (isSafetyBlock(message)) {
+      if (blockedByGuard || isSafetyBlock(message)) {
         return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "blocked-unsafe-redirect" as const, error: "Blocked: navigation to a private/unsafe address was prevented" } };
       }
       return { evidence: { evidenceId, text: cta.text, element: cta.tag, declaredUrl: destination.toString(), sameOrigin, navigationAttempted: true, outcome: "network-error" as const, error: message.slice(0, 300) } };
     } finally {
-      await probe.close();
+      await probe.close().catch(() => { /* may already be closed by the guard above */ });
     }
   }));
 
