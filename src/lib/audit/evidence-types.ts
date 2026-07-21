@@ -93,7 +93,8 @@ export type CtaOutcome =
   | "skipped-limit"
   | "skipped-invalid-url"
   | "skipped-potentially-state-changing"
-  | "skipped-ambiguous-locator";
+  | "skipped-ambiguous-locator"
+  | "skipped-unactionable";
 
 export interface CtaJourneyEvidence {
   evidenceId: EvidenceId;

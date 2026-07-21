@@ -10,7 +10,12 @@ const PRIVATE_IPV4_PATTERN = /\b(?:10|127|192\.168|169\.254|172\.(?:1[6-9]|2\d|3
 // Loopback (::1), link-local (fe80::/10) and unique-local (fc00::/7, i.e. fc/fd prefixes)
 // — the private/local IPv6 ranges, matched approximately (text redaction, not a strict
 // parser) since this only ever runs as defense-in-depth alongside assertSafeUrl.
-const PRIVATE_IPV6_PATTERN = /\b(?:::1|(?:fe80|fc[0-9a-f]{2}|fd[0-9a-f]{2}):[0-9a-fA-F:]*[0-9a-fA-F])\b/gi;
+// `:` and `[`/`]` are never "word" characters, so `\b` can never anchor next to them —
+// a `\b`-based version of this pattern silently never matches "::1" or "[::1]" at all
+// (verified: both survived redaction before this fix). Lookaround on hex-digit-or-colon
+// does the same job without relying on `\b`, and still lets brackets/whitespace/string
+// boundaries delimit a match correctly.
+const PRIVATE_IPV6_PATTERN = /(?<![0-9a-fA-F:])(?:::1|(?:fe80|fc[0-9a-f]{2}|fd[0-9a-f]{2}):[0-9a-fA-F:]*[0-9a-fA-F])(?![0-9a-fA-F:])/gi;
 const INTERNAL_HOSTNAME_PATTERN = /\b(?:localhost(?::\d+)?|[a-z0-9-]+\.(?:local|internal|lan|corp|intranet))\b/gi;
 const GENERIC_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 
@@ -108,11 +113,14 @@ export function sanitizeEvidenceV2(evidence: AuditEvidenceV2): AuditEvidenceV2 {
       canonical: evidence.seo.canonical ? sanitizeUrl(evidence.seo.canonical) : evidence.seo.canonical,
       robotsMeta: evidence.seo.robotsMeta ? sanitizeText(evidence.seo.robotsMeta, 300) : evidence.seo.robotsMeta,
       xRobotsTag: evidence.seo.xRobotsTag ? sanitizeText(evidence.seo.xRobotsTag, 300) : evidence.seo.xRobotsTag,
+      htmlLang: evidence.seo.htmlLang ? sanitizeText(evidence.seo.htmlLang, 50) : evidence.seo.htmlLang,
+      viewportMeta: evidence.seo.viewportMeta ? sanitizeText(evidence.seo.viewportMeta, 300) : evidence.seo.viewportMeta,
       headings: evidence.seo.headings.map((h) => ({ ...h, text: sanitizeText(h.text, 500) })),
-      hreflang: evidence.seo.hreflang.map((h) => ({ ...h, href: sanitizeUrl(h.href) })),
-      openGraph: evidence.seo.openGraph.map((og) => ({ ...og, content: sanitizeText(og.content, 1000) })),
+      hreflang: evidence.seo.hreflang.map((h) => ({ ...h, lang: sanitizeText(h.lang, 50), href: sanitizeUrl(h.href) })),
+      openGraph: evidence.seo.openGraph.map((og) => ({ ...og, property: sanitizeText(og.property, 100), content: sanitizeText(og.content, 1000) })),
       jsonLd: evidence.seo.jsonLd.map((j) => ({
         ...j,
+        types: j.types.map((t) => sanitizeText(t, 100)),
         sanitizedExcerpt: j.sanitizedExcerpt ? sanitizeText(j.sanitizedExcerpt, 400) : j.sanitizedExcerpt,
         parseError: j.parseError ? sanitizeText(j.parseError, 300) : j.parseError,
       })),

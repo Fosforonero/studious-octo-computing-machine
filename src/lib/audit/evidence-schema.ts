@@ -78,6 +78,7 @@ const ctaOutcome = z.enum([
   "skipped-invalid-url",
   "skipped-potentially-state-changing",
   "skipped-ambiguous-locator",
+  "skipped-unactionable",
 ]);
 const ctaInteraction = z.enum(["clicked", "followed-declared-url", "not-tested"]);
 
@@ -116,6 +117,7 @@ const ctaJourneyEvidence = z
       case "skipped-invalid-url":
       case "skipped-potentially-state-changing":
       case "skipped-ambiguous-locator":
+      case "skipped-unactionable":
         if (val.navigationAttempted) ctx.addIssue({ code: "custom", message: `${val.outcome} requires navigationAttempted=false` });
         requireSkipped();
         break;

@@ -358,6 +358,7 @@ interface ClickTestResult {
   redirectCount?: number;
   httpStatus?: number;
   error?: string;
+  skippedReason?: string;
   screenshot?: Buffer;
 }
 
@@ -391,7 +392,14 @@ interface ThrowawayContextOptions {
 async function followDeclaredUrlFallback(browser: Browser, contextOptions: ThrowawayContextOptions, candidate: ClassifiedCtaCandidate, cause: unknown): Promise<ClickTestResult> {
   const causeMessage = cause instanceof Error ? cause.message : "Could not perform a real click";
   if (candidate.kind !== "anchor") {
-    return { outcome: "network-error", interaction: "followed-declared-url", error: sanitizeText(`Click could not be performed and this element has no declared destination to verify directly: ${causeMessage}`, 300) };
+    // A button has no declared href — there is nothing to "follow declared URL" to, so
+    // this must not be reported as followed-declared-url (nothing was followed) or as
+    // network-error (no navigation was even attempted). It is honestly untested.
+    return {
+      outcome: "skipped-unactionable",
+      interaction: "not-tested",
+      skippedReason: sanitizeText(`Could not click this element and it has no declared destination to verify directly: ${causeMessage}`, 300),
+    };
   }
   const throwaway = await browser.newContext(contextOptions);
   await secureContext(throwaway);
@@ -444,7 +452,7 @@ async function performClickTest(browser: Browser, contextOptions: ThrowawayConte
     if (popupRef.current) return;
     popupRef.current = created;
     attachRedirectGuard(created, () => { blockedByGuard = true; });
-    created.on("response", (r) => { if (r.frame() === created.mainFrame()) popupResponses.push(r); });
+    created.on("response", (r) => { if (r.request().isNavigationRequest() && r.frame() === created.mainFrame()) popupResponses.push(r); });
   };
   throwaway.on("page", onNewPage);
 
@@ -468,16 +476,20 @@ async function performClickTest(browser: Browser, contextOptions: ThrowawayConte
       });
     }, candidate.groupKey);
     const matchCount: number = await arrayHandle.evaluate((arr) => arr.length);
+    const ambiguousReason = "Could not uniquely re-identify this element on a fresh page load";
     if (matchCount !== candidate.groupSize || candidate.groupIndex >= matchCount) {
       await arrayHandle.dispose();
-      return { outcome: "skipped-ambiguous-locator", interaction: "not-tested" };
+      return { outcome: "skipped-ambiguous-locator", interaction: "not-tested", skippedReason: ambiguousReason };
     }
     const elementHandle = (await arrayHandle.getProperty(String(candidate.groupIndex))).asElement();
     await arrayHandle.dispose();
-    if (!elementHandle) return { outcome: "skipped-ambiguous-locator", interaction: "not-tested" };
+    if (!elementHandle) return { outcome: "skipped-ambiguous-locator", interaction: "not-tested", skippedReason: ambiguousReason };
 
+    // isNavigationRequest() excludes fetch/XHR/image/other subresource requests the click
+    // might trigger — a button that only calls fetch() must never be misclassified as a
+    // navigation just because a response happened to arrive on the main frame.
     const mainResponses: Response[] = [];
-    probe.on("response", (r) => { if (r.frame() === probe.mainFrame()) mainResponses.push(r); });
+    probe.on("response", (r) => { if (r.request().isNavigationRequest() && r.frame() === probe.mainFrame()) mainResponses.push(r); });
     const urlBefore = probe.url();
 
     try {
@@ -501,11 +513,15 @@ async function performClickTest(browser: Browser, contextOptions: ThrowawayConte
     const finalResponse = responses.length ? responses[responses.length - 1] : null;
 
     if (!popupRef.current && !finalResponse && targetPage.url() === urlBefore) {
-      // A real click was dispatched but produced no navigation whatsoever — e.g. a
-      // decorative button, or one that only toggles in-page state. This is what replaces
-      // the old (buggy) behavior of treating a href-less button as "navigated" to the
-      // homepage.
-      return { outcome: "no-navigation", interaction: "clicked" };
+      // A real click was dispatched but produced no page navigation whatsoever — e.g. a
+      // decorative button, one that only calls fetch(), or one that opens a modal /
+      // expands an accordion / otherwise changes in-page state. This is what replaces the
+      // old (buggy) behavior of treating a href-less button as "navigated" to the
+      // homepage. A screenshot is still captured — the lack of navigation says nothing
+      // about whether the click produced a visible in-page change (a modal, a state
+      // toggle), which the screenshot can still show.
+      const screenshot = Buffer.from(await targetPage.screenshot({ type: "jpeg", quality: 70 }));
+      return { outcome: "no-navigation", interaction: "clicked", screenshot };
     }
 
     const redirectCount = await countRedirects(finalResponse);
@@ -575,7 +591,7 @@ async function testCtaJourneysEvidence(browser: Browser, contextOptions: Throwaw
         httpStatus: result.httpStatus,
         outcome: result.outcome,
         error: result.error,
-        skippedReason: result.outcome === "skipped-ambiguous-locator" ? "Could not uniquely re-identify this element on a fresh page load" : undefined,
+        skippedReason: result.skippedReason,
       },
       screenshot: result.screenshot,
     };

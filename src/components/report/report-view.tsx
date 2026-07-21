@@ -29,7 +29,9 @@ function buildWalkthrough(page: ExtractedPage): string[] {
       if (journey.interaction === "clicked" && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
         steps.push(`I click “${journey.text}” — it ${journey.outcome === "redirected" ? "redirects and loads" : "loads"}.`);
       } else if (journey.interaction === "clicked" && journey.outcome === "no-navigation") {
-        steps.push(`I click “${journey.text}” — nothing happens; it doesn't take me anywhere.`);
+        // The page not navigating is not the same as "nothing happens" — a modal, an
+        // accordion, or other in-page state change is still possible and unverified here.
+        steps.push(`I click “${journey.text}” — the page does not navigate; an in-page interaction may have occurred.`);
       } else if (journey.outcome === "external-not-visited") {
         steps.push(`I see “${journey.text}” — it points to an external site, not visited in this audit.`);
       } else if (journey.interaction === "followed-declared-url" && (journey.outcome === "navigated" || journey.outcome === "redirected")) {
@@ -39,8 +41,13 @@ function buildWalkthrough(page: ExtractedPage): string[] {
       }
     }
   } else {
+    // Pre-Evidence-Contract-v2 audits never recorded whether a click actually happened —
+    // only a destination the scanner resolved. Never say "I click" for data that doesn't
+    // demonstrate a real click.
     for (const journey of page.ctaJourneys.slice(0, 3)) {
-      steps.push(journey.sameOrigin ? `I click “${journey.text}” — ${journey.outcome.toLowerCase()}.` : `I click “${journey.text}” — it sends me to an external site.`);
+      steps.push(journey.sameOrigin
+        ? `I see “${journey.text}” — click execution was not recorded by the legacy audit; its recorded destination was ${journey.destination}.`
+        : `I see “${journey.text}” — it points to an external site.`);
     }
   }
   return steps;
@@ -77,7 +84,7 @@ export function ReportView({ audit }: { audit: AuditRecord }) {
 
       <section id="priorities" className="border-y bg-white"><div className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><div className="grid gap-10 lg:grid-cols-[.55fr_1.45fr]"><div><span className="eyebrow">Top priorities</span><h2 className="display mt-8 text-5xl md:text-6xl">Do these first.</h2><p className="mt-6 max-w-sm text-sm leading-6 text-muted-foreground">Ranked by expected impact, evidence and effort. Start at one; resist the urge to fix everything at once.</p></div><div className="space-y-3">{report.priorities.map((item, index) => <article key={item.title} className={`rounded-2xl border p-6 md:p-8 ${index === 0 ? "border-primary/30 bg-accent-soft" : "bg-background"}`}><div className="grid gap-5 md:grid-cols-[3rem_1fr_auto]"><span className={`grid size-10 place-items-center rounded-full text-xs font-black ${index === 0 ? "bg-primary text-primary-foreground" : "bg-muted"}`}>0{index + 1}</span><div><div className="flex flex-wrap gap-2"><h3 className="text-lg font-bold">{item.title}</h3><Badge variant={item.impact}>{item.impact} impact</Badge><Badge variant="outline">{item.effort} effort</Badge></div><div className="mt-5 border-l-2 pl-4 text-xs leading-5 text-muted-foreground"><strong className="text-foreground">Evidence: </strong>{item.evidence}</div><p className="mt-4 text-sm font-bold leading-6 text-primary">{item.recommendation}</p></div><ArrowUpRight className="hidden size-5 opacity-30 md:block" /></div></article>)}</div></div></div></section>
 
-      <section id="evidence" className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><div className="flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><span className="eyebrow">Visual evidence</span><h2 className="display mt-7 text-5xl md:text-6xl">What we saw.</h2></div><p className="max-w-md text-sm leading-6 text-muted-foreground">Markers identify the headline and key actions reviewed. The browser also follows safe, same-site CTA destinations without submitting forms.</p></div><div className="mt-10 grid gap-8 lg:grid-cols-[1.45fr_.55fr]"><div><div className="mb-3 flex items-center gap-2 text-xs font-bold"><Monitor className="size-4" /> Desktop</div><Screenshot src={audit.page?.desktopScreenshotPath} /></div><div><div className="mb-3 flex items-center gap-2 text-xs font-bold"><Smartphone className="size-4" /> Mobile</div><Screenshot src={audit.page?.mobileScreenshotPath} mobile /></div></div>
+      <section id="evidence" className="mx-auto max-w-[1500px] px-5 py-20 md:px-8"><div className="flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><span className="eyebrow">Visual evidence</span><h2 className="display mt-7 text-5xl md:text-6xl">What we saw.</h2></div><p className="max-w-md text-sm leading-6 text-muted-foreground">Markers identify the headline and key actions reviewed. Lensiq attempts a real click on safe, same-site actions — never submitting forms or other state-changing actions.</p></div><div className="mt-10 grid gap-8 lg:grid-cols-[1.45fr_.55fr]"><div><div className="mb-3 flex items-center gap-2 text-xs font-bold"><Monitor className="size-4" /> Desktop</div><Screenshot src={audit.page?.desktopScreenshotPath} /></div><div><div className="mb-3 flex items-center gap-2 text-xs font-bold"><Smartphone className="size-4" /> Mobile</div><Screenshot src={audit.page?.mobileScreenshotPath} mobile /></div></div>
 
         {audit.page?.cookieBanner.detected && <div className="mt-8 flex gap-4 rounded-2xl border border-amber-300/50 bg-amber-50 p-5"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-white text-amber-700"><Cookie className="size-4" /></div><div><h4 className="text-sm font-bold">Cookie banner detected on load</h4><p className="mt-1 text-xs leading-5 text-muted-foreground">The page showed a cookie consent banner{audit.page.cookieBanner.dismissed ? " — Lensiq dismissed it before capturing evidence so the report reflects the real page" : ""}. A visitor still has to act on it before reading your offer — factor that into your time-to-comprehension, not just your load time.</p></div></div>}
 

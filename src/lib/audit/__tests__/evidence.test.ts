@@ -235,6 +235,14 @@ test("skipped-ambiguous-locator requires interaction=not-tested and a skippedRea
   assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
 });
 
+test("skipped-unactionable requires interaction=not-tested, navigationAttempted=false and a skippedReason — a button click failure never becomes followed-declared-url or network-error", () => {
+  const evidence = validEvidence();
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "button", "Toggle"), declaredUrl: "https://x.com/", element: "button", interaction: "clicked", navigationAttempted: true, outcome: "skipped-unactionable" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, false);
+  evidence.desktop.ctaJourneys = [baseCta({ evidenceId: makeEvidenceId("cta", "button", "Toggle"), declaredUrl: "https://x.com/", element: "button", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-unactionable", skippedReason: "Could not click this element and it has no declared destination to verify directly" })];
+  assert.equal(AuditEvidenceV2Schema.safeParse(evidence).success, true);
+});
+
 test("field performance status=available without values is rejected", () => {
   const evidence = validEvidence();
   evidence.performance.field = { source: "crux", status: "available", percentile: 75, periodDays: 28, lcp: null, cls: null, inp: null };
@@ -326,16 +334,18 @@ test("deriveLegacyCtaJourneys never says 'Clicked' for a followed-declared-url j
   assert.doesNotMatch(legacy[0].outcome, /^Clicked/);
 });
 
-test("deriveLegacyCtaJourneys covers no-navigation, skipped-potentially-state-changing and skipped-ambiguous-locator", () => {
+test("deriveLegacyCtaJourneys covers no-navigation, skipped-potentially-state-changing, skipped-ambiguous-locator and skipped-unactionable", () => {
   const journeys: CtaJourneyEvidence[] = [
     baseCta({ evidenceId: "cta:1", declaredUrl: "https://x.com/", element: "button", interaction: "clicked", navigationAttempted: true, outcome: "no-navigation" }),
     baseCta({ evidenceId: "cta:2", declaredUrl: "https://x.com/", element: "button", type: "submit", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-potentially-state-changing", skippedReason: "state-changing" }),
     baseCta({ evidenceId: "cta:3", declaredUrl: "https://x.com/", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-ambiguous-locator", skippedReason: "ambiguous" }),
+    baseCta({ evidenceId: "cta:4", declaredUrl: "https://x.com/", element: "button", interaction: "not-tested", navigationAttempted: false, outcome: "skipped-unactionable", skippedReason: "unactionable" }),
   ];
   const legacy = deriveLegacyCtaJourneys(journeys);
   assert.match(legacy[0].outcome, /no navigation/i);
   assert.match(legacy[1].outcome, /state-changing/i);
   assert.match(legacy[2].outcome, /uniquely re-identify/i);
+  assert.match(legacy[3].outcome, /could not be clicked/i);
 });
 
 test("no Buffer or absolute local filesystem path survives into a schema-valid evidence object", () => {
@@ -371,13 +381,21 @@ test("redactSensitivePatterns-backed sanitizeText redacts private IPv6 and inter
   assert.doesNotMatch(out, /localhost:5432/);
 });
 
+test("sanitizeText redacts raw and bracketed IPv6 loopback (::1 and [::1]) — a \\b-anchored pattern never matches either, since : and [ ] are never word characters", () => {
+  const rawOut = sanitizeText("connect to ::1 for local testing", 1000);
+  assert.doesNotMatch(rawOut, /::1/);
+  const bracketedOut = sanitizeText("internal probe hit http://[::1]/admin unexpectedly", 1000);
+  assert.doesNotMatch(bracketedOut, /::1/);
+});
+
 test("sanitizeEvidenceV2 redacts sensitive content across every major evidence group, not just one nested href", () => {
   const evidence = validEvidence();
   const email = "leak@example.com";
   const uuid = "550e8400-e29b-41d4-a716-446655440000";
   const token = "aVeryLongOpaqueToken1234567890123456";
   const privateIp = "10.1.2.3";
-  const secret = `${email} ${uuid} ${token} ${privateIp}`;
+  const privateIpv6 = "fe80::1ff:fe23:4567:890a";
+  const secret = `${email} ${uuid} ${token} ${privateIp} ${privateIpv6}`;
 
   evidence.methodology.pageGoal = `signups ${secret}`;
   evidence.desktop.browser.headline = `Welcome ${secret}`;
@@ -388,16 +406,20 @@ test("sanitizeEvidenceV2 redacts sensitive content across every major evidence g
   evidence.seo.metaDescription = `Description ${secret}`;
   evidence.seo.robotsMeta = `index, ${secret}`;
   evidence.seo.xRobotsTag = `noindex, ${secret}`;
+  evidence.seo.htmlLang = `en ${secret}`;
+  evidence.seo.viewportMeta = `width=device-width ${secret}`;
   evidence.seo.headings = [{ level: 1, text: `Heading ${secret}` }];
   evidence.seo.links = [{ text: `Link ${secret}`, href: "https://example.com/x", sameOrigin: true }];
-  evidence.seo.jsonLd = [{ evidenceId: "jsonld:abc", parsed: false, types: [], parseError: `bad json ${secret}`, excerptHash: "a".repeat(64), contentMatch: null, contentMatchStatus: "not-assessed" }];
+  evidence.seo.hreflang = [{ evidenceId: "hreflang:1", lang: `en ${secret}`, href: "https://example.com/en" }];
+  evidence.seo.openGraph = [{ evidenceId: "og:1", property: `og:title ${secret}`, content: `content ${secret}` }];
+  evidence.seo.jsonLd = [{ evidenceId: "jsonld:abc", parsed: false, types: [`Product ${secret}`], parseError: `bad json ${secret}`, excerptHash: "a".repeat(64), contentMatch: null, contentMatchStatus: "not-assessed" }];
   evidence.desktop.console.failedRequests = [{ evidenceId: "network:1", url: "https://example.com/x", resourceType: "image", domain: `${secret}.example.com`, status: 404 }];
   evidence.accessibility.desktop.automatedChecks.failedAudits = [{ evidenceId: "acc:1", id: "color-contrast", title: `Contrast issue ${secret}`, impact: `serious ${secret}` }];
   evidence.desktop.ctaJourneys = [baseCta({ evidenceId: "cta:x", text: `Click ${secret}`, declaredUrl: "https://example.com/x", interaction: "clicked", outcome: "network-error", error: `Failed ${secret}`, skippedReason: undefined })];
 
   const sanitized = sanitizeEvidenceV2(evidence);
   const serialized = JSON.stringify(sanitized);
-  for (const needle of [email, uuid, token, privateIp]) {
+  for (const needle of [email, uuid, token, privateIp, privateIpv6]) {
     assert.doesNotMatch(serialized, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `expected "${needle}" to be redacted somewhere in the sanitized evidence`);
   }
 });

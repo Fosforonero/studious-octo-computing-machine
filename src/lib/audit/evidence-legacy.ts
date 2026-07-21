@@ -40,5 +40,7 @@ function legacyOutcomeText(journey: CtaJourneyEvidence): string {
       return "Not tested — potentially state-changing action (e.g. submit, purchase, delete)";
     case "skipped-ambiguous-locator":
       return "Not tested — could not uniquely re-identify this element";
+    case "skipped-unactionable":
+      return "Not tested — this element could not be clicked and has no declared destination to verify";
   }
 }
