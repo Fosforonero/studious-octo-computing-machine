@@ -1,4 +1,4 @@
-import { chromium, type BrowserContext, type Page, type Response } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Response } from "playwright";
 import { assertSafeUrl } from "@/lib/security/url";
 import type { ExtractedPage } from "@/lib/audit/types";
 import type { BrowserEvidence, CookieBannerEvidence, ConsoleNetworkEvidence, CtaInteraction, CtaJourneyEvidence, CtaOutcome, EvidenceStatus, JsonLdEvidence, SeoEvidence, TestExecutionRecord } from "@/lib/audit/evidence-types";
@@ -383,12 +383,19 @@ function attachRedirectGuard(page: Page, onBlocked: () => void): void {
   });
 }
 
-async function followDeclaredUrlFallback(context: BrowserContext, candidate: ClassifiedCtaCandidate, cause: unknown): Promise<ClickTestResult> {
+interface ThrowawayContextOptions {
+  viewport: { width: number; height: number };
+  userAgent: string;
+}
+
+async function followDeclaredUrlFallback(browser: Browser, contextOptions: ThrowawayContextOptions, candidate: ClassifiedCtaCandidate, cause: unknown): Promise<ClickTestResult> {
   const causeMessage = cause instanceof Error ? cause.message : "Could not perform a real click";
   if (candidate.kind !== "anchor") {
     return { outcome: "network-error", interaction: "followed-declared-url", error: sanitizeText(`Click could not be performed and this element has no declared destination to verify directly: ${causeMessage}`, 300) };
   }
-  const probe = await context.newPage();
+  const throwaway = await browser.newContext(contextOptions);
+  await secureContext(throwaway);
+  const probe = await throwaway.newPage();
   let blockedByGuard = false;
   attachRedirectGuard(probe, () => { blockedByGuard = true; });
   try {
@@ -405,7 +412,7 @@ async function followDeclaredUrlFallback(context: BrowserContext, candidate: Cla
     }
     return { outcome: "network-error", interaction: "followed-declared-url", error: message.slice(0, 300) };
   } finally {
-    await probe.close().catch(() => { /* may already be closed by the guard above */ });
+    await throwaway.close().catch(() => { /* may already be closed by the guard above */ });
   }
 }
 
@@ -414,8 +421,17 @@ async function followDeclaredUrlFallback(context: BrowserContext, candidate: Cla
 // Playwright click and observes what actually happens — same-tab navigation, a new
 // popup/tab, client-side (History API) routing, or nothing at all. Never infers a
 // navigation outcome purely from the declared href.
-async function performClickTest(context: BrowserContext, sourceUrl: string, candidate: ClassifiedCtaCandidate): Promise<ClickTestResult> {
-  const probe = await context.newPage();
+//
+// Runs in its own disposable BrowserContext (not just a new page in a shared one): CTA
+// tests run concurrently (Promise.all in testCtaJourneysEvidence below), and
+// BrowserContext's "page" event fires for every new page created anywhere in that
+// context — a shared context would let one test's popup-detection listener catch
+// another concurrently-running test's own probe, corrupting both. A fresh context per
+// test keeps every test's event namespace, and therefore its popup detection, isolated.
+async function performClickTest(browser: Browser, contextOptions: ThrowawayContextOptions, sourceUrl: string, candidate: ClassifiedCtaCandidate): Promise<ClickTestResult> {
+  const throwaway = await browser.newContext(contextOptions);
+  await secureContext(throwaway);
+  const probe = await throwaway.newPage();
   let blockedByGuard = false;
   attachRedirectGuard(probe, () => { blockedByGuard = true; });
 
@@ -430,7 +446,7 @@ async function performClickTest(context: BrowserContext, sourceUrl: string, cand
     attachRedirectGuard(created, () => { blockedByGuard = true; });
     created.on("response", (r) => { if (r.frame() === created.mainFrame()) popupResponses.push(r); });
   };
-  context.on("page", onNewPage);
+  throwaway.on("page", onNewPage);
 
   try {
     await probe.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
@@ -469,7 +485,7 @@ async function performClickTest(context: BrowserContext, sourceUrl: string, cand
     } catch (clickError) {
       // The element could not actually be clicked (covered, detached, unactionable) — a
       // real click never happened, so this must never be reported to the user as "clicked".
-      return await followDeclaredUrlFallback(context, candidate, clickError);
+      return await followDeclaredUrlFallback(browser, contextOptions, candidate, clickError);
     }
 
     await probe.waitForLoadState("networkidle", { timeout: 8_000 }).catch(() => undefined);
@@ -503,13 +519,12 @@ async function performClickTest(context: BrowserContext, sourceUrl: string, cand
     }
     return { outcome: "network-error", interaction: "clicked", error: message.slice(0, 300) };
   } finally {
-    context.off("page", onNewPage);
-    await popupRef.current?.close().catch(() => { /* may already be closed by the guard above */ });
-    await probe.close().catch(() => { /* may already be closed by the guard above */ });
+    throwaway.off("page", onNewPage);
+    await throwaway.close().catch(() => { /* may already be closed by the guard above */ });
   }
 }
 
-async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: string, candidates: RawCtaCandidate[]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
+async function testCtaJourneysEvidence(browser: Browser, contextOptions: ThrowawayContextOptions, sourceUrl: string, candidates: RawCtaCandidate[]): Promise<{ evidence: CtaJourneyEvidence; screenshot?: Buffer }[]> {
   const source = new URL(sourceUrl);
 
   const classified: ClassifiedCtaCandidate[] = candidates.map((c) => {
@@ -549,7 +564,7 @@ async function testCtaJourneysEvidence(context: BrowserContext, sourceUrl: strin
   const overLimit = eligible.slice(5);
 
   const testedResults = await Promise.all(tested.map(async (c) => {
-    const result = await performClickTest(context, sourceUrl, c);
+    const result = await performClickTest(browser, contextOptions, sourceUrl, c);
     return {
       evidence: {
         ...makeBase(c),
@@ -743,7 +758,7 @@ export async function scanHomepage(inputUrl: string): Promise<BrowserScanResult>
     let ctaResults: { evidence: CtaJourneyEvidence; screenshot?: Buffer }[] = [];
     try {
       const ctaCandidates = await extractCtaCandidates(desktopPage);
-      ctaResults = await testCtaJourneysEvidence(desktop, pageData.url, ctaCandidates);
+      ctaResults = await testCtaJourneysEvidence(browser, { viewport: { width: 1440, height: 1000 }, userAgent: desktopUserAgent }, pageData.url, ctaCandidates);
       tests.push({ id: "cta-journey-desktop", status: "passed" });
     } catch (error) {
       tests.push({ id: "cta-journey-desktop", status: "failed", reason: error instanceof Error ? error.message : "CTA journey testing failed" });
